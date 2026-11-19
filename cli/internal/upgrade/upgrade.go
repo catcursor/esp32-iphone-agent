@@ -42,6 +42,15 @@ type Index struct {
 // Platform is the asset key, e.g. darwin_arm64.
 func Platform() string { return runtime.GOOS + "_" + runtime.GOARCH }
 
+type httpStatusError struct {
+	url  string
+	code int
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s: HTTP %d", e.url, e.code)
+}
+
 func get(ctx context.Context, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -53,7 +62,7 @@ func get(ctx context.Context, url string) (*http.Response, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
+		return nil, &httpStatusError{url: url, code: resp.StatusCode}
 	}
 	return resp, nil
 }
@@ -72,8 +81,12 @@ func fetchIndex(ctx context.Context, url string) (*Index, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	return decodeIndex(resp.Body)
+}
+
+func decodeIndex(body io.Reader) (*Index, error) {
 	var idx Index
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&idx); err != nil {
+	if err := json.NewDecoder(io.LimitReader(body, 1<<20)).Decode(&idx); err != nil {
 		return nil, fmt.Errorf("versions.json: %w", err)
 	}
 	if _, ok := parse(idx.Latest); !ok {

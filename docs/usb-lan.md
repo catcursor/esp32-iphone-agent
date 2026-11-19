@@ -6,7 +6,7 @@
 
 固件基于 Arduino-ESP32 3.3.12 和 NimBLE-Arduino 2.5.1。使用仓库的 [构建脚本](../hardware/flash.sh) 与其 XIAO ESP32S3 构建参数。Sense 拍照使用摄像头扩展板，传感器实测为 OV5640。摄像头驱动包含 Espressif 的 [PSRAM DMA JPEG 取帧修复](https://github.com/espressif/esp32-camera/pull/871)，许可证随驱动源码提供。
 
-在[本 fork 的发布页](https://github.com/catcursor/esp32-iphone-agent/releases)选择 `cli-v` 版本。Apple Silicon Mac 下载 `esp32agent_darwin_arm64.tar.gz`，Windows x64 下载 `esp32agent_windows_amd64.zip`，Debian 等 x64 Linux 下载 `esp32agent_linux_amd64.tar.gz`。安装后用 `esp32agent version` 核对版本。用 `esp32agent upgrade --check` 手动检查本 fork 的新版本，用 `esp32agent upgrade` 下载并校验当前平台的更新。旧版客户端首次切换更新源时，先从本 fork 安装新版。手机截图还需要 FFmpeg。
+在[本 fork 的发布页](https://github.com/catcursor/esp32-iphone-agent/releases)选择 `cli-v` 版本。Apple Silicon Mac 下载 `esp32agent_darwin_arm64.tar.gz`，Windows x64 下载 `esp32agent_windows_amd64.zip`，Debian 等 x64 Linux 下载 `esp32agent_linux_amd64.tar.gz`。安装后用 `esp32agent version` 核对版本。用 `esp32agent upgrade --check` 手动检查本 fork 的新版本，用 `esp32agent upgrade` 下载并校验当前平台的更新。遇到 GitHub 匿名 API 限流时，客户端会从此仓库最新发布页读取 `versions.json`。旧版客户端首次切换更新源时，先从本 fork 安装新版。手机截图还需要 FFmpeg。
 
 也可在 Windows 上从源码构建。下列 PowerShell 命令从本分支仓库根目录运行，需要 `cli/go.mod` 指定的 Go 版本。
 

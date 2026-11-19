@@ -37,12 +37,19 @@ trap 'rm -rf "$tmp"' EXIT
 read_json() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c '
-import json, sys
+import json, re, sys
 op, path, version, platform = sys.argv[1:]
 with open(path, encoding="utf-8") as f: doc = json.load(f)
 if op == "tags":
     for release in doc:
         if not release["draft"] and not release["prerelease"]: print(release["tag_name"])
+elif op == "latest":
+    version = doc["latest"]
+    stable = r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}"
+    if (not isinstance(version, str) or not re.fullmatch(stable, version)
+            or not any(r["version"] == version for r in doc["versions"])):
+        sys.exit("invalid latest CLI version in the GitHub manifest")
+    print(version)
 else:
     version = version or doc["latest"]
     for release in doc["versions"]:
@@ -58,6 +65,11 @@ else:
       my $doc = decode_json(<$f>);
       if ($op eq "tags") {
         for (@$doc) { print "$_->{tag_name}\n" unless $_->{draft} || $_->{prerelease} }
+      } elsif ($op eq "latest") {
+        my $v = $doc->{latest};
+        die "invalid latest CLI version in the GitHub manifest\n"
+          unless defined($v) && $v =~ /\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z/ && grep { $_->{version} eq $v } @{$doc->{versions}};
+        print "$v\n";
       } else {
         $version ||= $doc->{latest};
         my ($r) = grep { $_->{version} eq $version } @{$doc->{versions}};
@@ -91,13 +103,23 @@ else
     if [ -z "$version" ]; then
       page=1
       while :; do
-        curl -fsSL -D "$tmp/headers" -o "$tmp/page" "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page"
+        status=$(curl -sSL -w '%{http_code}' -D "$tmp/headers" -o "$tmp/page" "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page")
+        case $status in
+          200) ;;
+          403|429)
+            curl -fsSL -o "$tmp/index" "https://github.com/$REPO/releases/latest/download/versions.json"
+            version=$(read_json latest "$tmp/index" "" "")
+            break ;;
+          *) die "GitHub release lookup returned HTTP $status" ;;
+        esac
         read_json tags "$tmp/page" "" "" >>"$tmp/tags"
         grep -iq '^link:.*rel="next"' "$tmp/headers" || break
         page=$((page + 1))
       done
-      version=$(sed -nE 's/^cli-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$/\1/p' "$tmp/tags" |
-        LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n '1p')
+      if [ -z "$version" ]; then
+        version=$(sed -nE 's/^cli-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$/\1/p' "$tmp/tags" |
+          LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n '1p')
+      fi
       [ -n "$version" ] || die "no published stable CLI release on github.com/$REPO"
     fi
     url=https://github.com/$REPO/releases/download/cli-v$version

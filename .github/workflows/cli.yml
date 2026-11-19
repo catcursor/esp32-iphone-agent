@@ -151,4 +151,4 @@ jobs:
             gh release create "$tag" -R "$repo" --verify-tag --draft --title "esp32agent ${tag#cli-v}" --notes "Native CLI for macOS arm64, Windows x64 and Linux x64."
           fi
           gh release upload "$tag" -R "$repo" --clobber esp32agent_* checksums.txt versions.json
-          gh release edit "$tag" -R "$repo" --draft=false
+          gh release edit "$tag" -R "$repo" --draft=false --latest

@@ -38,7 +38,19 @@ try {
                 $page = 1
                 $latest = $null
                 do {
-                    $releases = Invoke-RestMethod "https://api.github.com/repos/$repo/releases?per_page=100&page=$page"
+                    try {
+                        $releases = Invoke-RestMethod "https://api.github.com/repos/$repo/releases?per_page=100&page=$page"
+                    } catch {
+                        if ([int]$_.Exception.Response.StatusCode -notin 403, 429) { throw }
+                        $manifest = Invoke-RestMethod "https://github.com/$repo/releases/latest/download/versions.json"
+                        $stable = $manifest.latest
+                        if ($stable -isnot [string] -or $stable -cnotmatch '\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z' -or
+                            $manifest.versions.version -cnotcontains $stable) {
+                            throw 'invalid latest CLI version in the GitHub manifest'
+                        }
+                        $latest = $stable
+                        break
+                    }
                     foreach ($release in $releases) {
                         if (-not $release.draft -and -not $release.prerelease -and
                             $release.tag_name -cmatch '^cli-v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$') {
