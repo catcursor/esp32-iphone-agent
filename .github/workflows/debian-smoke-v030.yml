@@ -1,34 +1,44 @@
-name: Smoke test the Linux archive on Debian
+name: Smoke test the published Linux updater
 on:
   push:
     branches: ["ci/debian-smoke-cli-v0.3.0"]
-permissions:
-  actions: read
-  contents: read
+permissions: {}
 jobs:
-  debian:
+  upgrade:
     runs-on: ubuntu-24.04
+    timeout-minutes: 18
     steps:
-      - name: Download the release-tag Linux artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: esp32agent_linux_amd64
-          run-id: 44529311663
-          github-token: ${{ github.token }}
-      - name: Verify the archive and start the executable on Debian
+      - name: Download public release and verify known release-tag digest
         shell: bash
         run: |
           set -euo pipefail
-          echo '90000efd182f138e681b0b66bdf2f8b3fada40cad4b6278d41ea5879414498d9  esp32agent_linux_amd64.tar.gz' | sha256sum --check
-          mkdir executable
-          tar -xf esp32agent_linux_amd64.tar.gz -C executable
-          for suite in trixie bookworm; do
-            docker pull --platform linux/amd64 "debian:$suite-slim"
-            docker run --rm --platform linux/amd64 --network none --read-only --tmpfs /tmp --mount "type=bind,src=$PWD/executable,dst=/bin-under-test,readonly" "debian:$suite-slim" sh -ec '
-              . /etc/os-release
-              echo "$PRETTY_NAME $(dpkg --print-architecture)" >&2
-              test "$(dpkg --print-architecture)" = amd64
-              HOME=/tmp /bin-under-test/esp32agent version
-            ' | tee "version-$suite.json"
-            jq -e '.data.version == "0.3.0"' "version-$suite.json"
+          base='https://github.com/catcursor/esp32-iphone-agent/releases/download/cli-v0.3.0'
+          archive='esp32agent_linux_amd64.tar.gz'
+          for attempt in {1..85}; do
+            if curl --silent --location --fail -o "$archive" "$base/$archive"; then break; fi
+            sleep 10
           done
+          echo "90000efd182f138e681b0b66bdf2f8b3fada40cad4b6278d41ea5879414498d9  $archive" | sha256sum --check
+          mkdir isolated
+          tar -xf "$archive" -C isolated
+      - name: Check default update feed and replace an isolated binary from the public release
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset ESP32AGENT_VERSIONS_URL GITHUB_TOKEN GH_TOKEN
+          export HOME="$RUNNER_TEMP/isolated-home"
+          mkdir -p "$HOME"
+          cd isolated
+          sha256sum esp32agent > original.sha256
+          old_inode=$(stat -c '%i' esp32agent)
+          for attempt in {1..5}; do
+            if ./esp32agent upgrade --check | tee check.json; then break; fi
+            sleep 5
+          done
+          jq -e '.status == "ok" and .data.current == "0.3.0" and .data.latest == "0.3.0" and .data.update_available == false' check.json
+          ./esp32agent upgrade --force | tee force.json
+          jq -e '.status == "ok" and .data.previous == "0.3.0" and .data.version == "0.3.0"' force.json
+          test "$(stat -c '%i' esp32agent)" != "$old_inode"
+          sha256sum --check original.sha256
+          ./esp32agent version | tee after.json
+          jq -e '.status == "ok" and .data.version == "0.3.0"' after.json
