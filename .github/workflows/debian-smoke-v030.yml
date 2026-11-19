@@ -1,0 +1,34 @@
+name: Smoke test the Linux archive on Debian
+on:
+  push:
+    branches: ["ci/debian-smoke-cli-v0.3.0"]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  debian:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download the release-tag Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: esp32agent_linux_amd64
+          run-id: 44529311663
+          github-token: ${{ github.token }}
+      - name: Verify the archive and start the executable on Debian
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '90000efd182f138e681b0b66bdf2f8b3fada40cad4b6278d41ea5879414498d9  esp32agent_linux_amd64.tar.gz' | sha256sum --check
+          mkdir executable
+          tar -xf esp32agent_linux_amd64.tar.gz -C executable
+          for suite in trixie bookworm; do
+            docker pull --platform linux/amd64 "debian:$suite-slim"
+            docker run --rm --platform linux/amd64 --network none --read-only --tmpfs /tmp --mount "type=bind,src=$PWD/executable,dst=/bin-under-test,readonly" "debian:$suite-slim" sh -ec '
+              . /etc/os-release
+              echo "$PRETTY_NAME $(dpkg --print-architecture)" >&2
+              test "$(dpkg --print-architecture)" = amd64
+              HOME=/tmp /bin-under-test/esp32agent version
+            ' | tee "version-$suite.json"
+            jq -e '.data.version == "0.3.0"' "version-$suite.json"
+          done
