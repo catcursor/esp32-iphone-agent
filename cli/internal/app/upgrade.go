@@ -30,12 +30,20 @@ func (a *App) upgrade(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	idx, err := upgrade.Fetch(ctx, upgrade.URL())
+	idx, err := upgrade.Fetch(ctx)
 	if err != nil {
 		return a.fail(fmt.Errorf("could not read the version list: %w", err))
 	}
 	dev := !upgrade.Valid(Version)
 	newer := !dev && upgrade.Compare(idx.Latest, Version) > 0
+	rel, ok := idx.Find(idx.Latest)
+	if !ok {
+		return a.fail(fmt.Errorf("version %s is not in the version list", idx.Latest))
+	}
+	asset, ok := rel.Assets[upgrade.Platform()]
+	if !ok || asset.URL == "" {
+		return a.fail(fmt.Errorf("version %s has no build for %s", idx.Latest, upgrade.Platform()))
+	}
 	if *check {
 		out := map[string]any{"current": Version, "latest": idx.Latest, "update_available": newer}
 		if dev {
@@ -49,14 +57,6 @@ func (a *App) upgrade(args []string) int {
 		}
 		return a.print(daemon.Response{Status: "ok", Data: map[string]any{"current": Version, "latest": idx.Latest,
 			"message": "already up to date"}})
-	}
-	rel, ok := idx.Find(idx.Latest)
-	if !ok {
-		return a.fail(fmt.Errorf("version %s is not in the version list", idx.Latest))
-	}
-	asset, ok := rel.Assets[upgrade.Platform()]
-	if !ok {
-		return a.fail(fmt.Errorf("version %s has no build for %s", idx.Latest, upgrade.Platform()))
 	}
 	exe, err := executable()
 	if err != nil {

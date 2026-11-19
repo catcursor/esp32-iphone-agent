@@ -7,13 +7,19 @@
 ## 安装
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/onehumanbeing/esp32-iphone-agent/main/cli/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/catcursor/esp32-iphone-agent/sense-usb-lan/cli/install/install.sh | sh
 ```
 
-Windows（PowerShell）：`irm https://raw.githubusercontent.com/onehumanbeing/esp32-iphone-agent/main/cli/install/install.ps1 | iex`。
-npm：`npm install -g esp32agent`。安装脚本读取 `https://manina.ai/cli/versions.json` 上的版本列表（读不到时改用 GitHub Releases），并校验压缩包的 SHA-256。截图需要 `ffmpeg`（安装脚本会提示用 brew / apt / dnf / winget 安装）。以后升级：`esp32agent upgrade`。
+Windows（PowerShell）：`irm https://raw.githubusercontent.com/catcursor/esp32-iphone-agent/sense-usb-lan/cli/install/install.ps1 | iex`。
+本分支提供 macOS Apple Silicon、Windows x64 和 Linux x64 可执行程序，安装脚本会校验下载包的 SHA-256。用 `esp32agent upgrade --check` 检查更新，用 `esp32agent upgrade` 安装更新。[下载本分支发布版](https://github.com/catcursor/esp32-iphone-agent/releases) · [通过 USB 配对后直连局域网](../docs/usb-lan.md)
 
-## 配对
+## 通过 USB 配对
+
+把板子接到电脑，用实际串口替换 `PORT` 后运行 `esp32agent pair-usb PORT`。
+配对后把板子接到 iPhone，再在电脑上运行 `esp32agent device info` 验证局域网连接。
+板子的地址改变后，用 `esp32agent target HOST` 更新电脑保存的地址。
+
+## 通过蓝牙配对
 
 1. 把板子插到 iPhone 上，三分钟内运行 `esp32agent pair`。
 2. 在 iPhone 上：控制中心 > 屏幕镜像 > ESP32 Agent。
@@ -107,4 +113,4 @@ make -C hardware/tests/sim      # 模拟板子（固件的 cli_link.cpp）：启
 ESP32AGENT_SIM=$PWD/hardware/tests/sim/cli_sim esp32agent screenshot   # 让 CLI 连模拟器
 ```
 
-发布：推送 tag `cli-vX.Y.Z`；`.github/workflows/cli.yml` 会为 amd64/arm64 构建 darwin（cgo、CoreBluetooth）、linux 和 windows（纯 Go）版本，并上传压缩包和 `checksums.txt`。它还会生成一个 `versions.json` 产物（[格式](install/versions.example.json)）；把它合并进 `https://manina.ai/cli/versions.json` 需要手动完成。`ESP32AGENT_VERSIONS_URL` 可以让 `upgrade` 和安装脚本改读另一份列表（用于测试）。测试安装脚本：`ESP32AGENT_ARCHIVE=/path/esp32agent_darwin_arm64.tar.gz sh cli/install/install.sh`（`checksums.txt` 放在同一目录）。
+推送 `cli-vX.Y.Z` 稳定版本标签后，GitHub Actions 将三个平台的压缩包、`checksums.txt` 和[版本清单](install/versions.example.json)一起发布到本 fork 的 GitHub Releases。可用 `ESP32AGENT_VERSIONS_URL` 指定自己的清单地址。

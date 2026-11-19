@@ -17,6 +17,9 @@ import (
 
 var comPort = regexp.MustCompile(`^COM[1-9][0-9]{0,3}$`)
 
+const ownerFile = "owner.dpapi"
+const credentialSuffix = ".dpapi"
+
 func usbCommand(port string, command []byte) ([]byte, error) {
 	port = strings.ToUpper(strings.TrimSpace(port))
 	if !comPort.MatchString(port) {

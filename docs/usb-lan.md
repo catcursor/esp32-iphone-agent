@@ -1,12 +1,14 @@
-# Windows 局域网控制与 Sense 拍照
+# 局域网控制与 Sense 拍照
 
-本分支基于 Henry Yuan 的 [ESP32 iPhone Agent](https://github.com/onehumanbeing/esp32-iphone-agent)。使用本分支的固件和 Windows 命令行程序，可以通过物理 USB 完成首次配对。之后在电脑上运行命令即可通过局域网与板子建立加密连接。
+本分支基于 Henry Yuan 的 [ESP32 iPhone Agent](https://github.com/onehumanbeing/esp32-iphone-agent)。每台电脑通过物理 USB 完成首次配对后，即可通过局域网与板子建立加密连接。
 
 ## 准备固件、命令和技能
 
 固件基于 Arduino-ESP32 3.3.12 和 NimBLE-Arduino 2.5.1。使用仓库的 [构建脚本](../hardware/flash.sh) 与其 XIAO ESP32S3 构建参数。Sense 拍照使用摄像头扩展板，传感器实测为 OV5640。摄像头驱动包含 Espressif 的 [PSRAM DMA JPEG 取帧修复](https://github.com/espressif/esp32-camera/pull/871)，许可证随驱动源码提供。
 
-在 Windows 上从本分支仓库根目录运行下列 PowerShell 命令。需要 `cli/go.mod` 指定版本的 Go，以及用于解码手机截图的 FFmpeg。
+在[本 fork 的发布页](https://github.com/catcursor/esp32-iphone-agent/releases)选择 `cli-v` 版本。Apple Silicon Mac 下载 `esp32agent_darwin_arm64.tar.gz`，Windows x64 下载 `esp32agent_windows_amd64.zip`，Debian 等 x64 Linux 下载 `esp32agent_linux_amd64.tar.gz`。安装后用 `esp32agent version` 核对版本。用 `esp32agent upgrade --check` 手动检查本 fork 的新版本，用 `esp32agent upgrade` 下载并校验当前平台的更新。旧版客户端首次切换更新源时，先从本 fork 安装新版。手机截图还需要 FFmpeg。
+
+也可在 Windows 上从源码构建。下列 PowerShell 命令从本分支仓库根目录运行，需要 `cli/go.mod` 指定的 Go 版本。
 
 ```powershell
 $bin = Join-Path $env:USERPROFILE '.local\bin'
@@ -20,9 +22,9 @@ Copy-Item -Recurse -Force ./skills/iphone-lan $skills
 
 ## 配对并使用
 
-1. 用数据线将板子接到 Windows。用设备管理器看清串口号，用实际端口替换下例中的 `COM3`。
+1. 用数据线将板子接到电脑，用实际端口替换下例中的 `COM3`。Windows 可在设备管理器查看端口。macOS 通常为 `/dev/cu.usbmodem…`，Debian 等 Linux 通常为 `/dev/ttyACM0`，当前用户需要有该串口的读写权限。
 2. 如果板子还没加入你的 Wi-Fi，先运行 `esp32agent usb COM3 wifi join "网络名称"`，在本机提示中输入密码。用 `esp32agent usb COM3 wifi status` 核对地址。ESP32-S3 使用 2.4 GHz Wi-Fi。
-3. 运行 `esp32agent pair-usb COM3`。板子保存控制凭据，Windows 用当前用户的 DPAPI 保存本地副本。拍照的认证密钥从同一份凭据派生。早期独立的拍照凭据继续只授予拍照权限。
+3. 运行 `esp32agent pair-usb COM3`。板子保存控制凭据，Windows 用当前用户的 DPAPI 保存本地副本。macOS 和 Linux 将凭据保存在当前用户的私有配置目录中，文件权限为 `0600`，内容以明文保存。拍照的认证密钥从同一份凭据派生。早期独立的拍照凭据继续只授予拍照权限。
 4. 把板子用 USB 接到 iPhone。手机与板子加入同一局域网，在控制中心将「屏幕镜像」投到 ESP32 Agent，再开启「辅助触控」。电脑能访问板子的局域网地址即可。
 5. 运行 `esp32agent device info` 核对身份和状态，用 `esp32agent screenshot` 验证手机画面。`esp32agent photo` 调用的是板载镜头，拍摄一张 JPEG 并返回本机路径。
 

@@ -20,9 +20,6 @@ import (
 	"strings"
 )
 
-// DefaultURL lists the releases; ESP32AGENT_VERSIONS_URL overrides it.
-const DefaultURL = "https://manina.ai/cli/versions.json"
-
 const maxDownload = 200 << 20
 
 type Asset struct {
@@ -40,13 +37,6 @@ type Release struct {
 type Index struct {
 	Latest   string    `json:"latest"`
 	Versions []Release `json:"versions"`
-}
-
-func URL() string {
-	if u := os.Getenv("ESP32AGENT_VERSIONS_URL"); u != "" {
-		return u
-	}
-	return DefaultURL
 }
 
 // Platform is the asset key, e.g. darwin_arm64.
@@ -68,7 +58,15 @@ func get(ctx context.Context, url string) (*http.Response, error) {
 	return resp, nil
 }
 
-func Fetch(ctx context.Context, url string) (*Index, error) {
+// Fetch uses the fork's CLI releases unless the user explicitly supplies a versions.json URL.
+func Fetch(ctx context.Context) (*Index, error) {
+	if url := os.Getenv("ESP32AGENT_VERSIONS_URL"); url != "" {
+		return fetchIndex(ctx, url)
+	}
+	return fetchGitHub(ctx, "https://api.github.com/repos/"+repository+"/releases", "https://github.com/"+repository+"/releases/download")
+}
+
+func fetchIndex(ctx context.Context, url string) (*Index, error) {
 	resp, err := get(ctx, url)
 	if err != nil {
 		return nil, err
@@ -149,8 +147,8 @@ func Compare(a, b string) int {
 // Install downloads the asset next to exe, checks its SHA-256, takes the binary out of the archive and moves it
 // over exe (on Windows the running exe is renamed to .old first).
 func Install(ctx context.Context, a Asset, exe string) error {
-	if len(a.SHA256) != 64 {
-		return errors.New("versions.json has no sha256 for this download")
+	if sum, err := hex.DecodeString(a.SHA256); err != nil || len(sum) != sha256.Size {
+		return errors.New("versions.json has no valid sha256 for this download")
 	}
 	dir := filepath.Dir(exe)
 	resp, err := get(ctx, a.URL)
@@ -218,13 +216,16 @@ func extract(f *os.File, size int64, isZip bool, out io.Writer) error {
 			return err
 		}
 		for _, zf := range zr.File {
-			if isBinary(zf.Name) {
+			if zf.Mode().IsRegular() && isBinary(zf.Name) {
+				if zf.UncompressedSize64 == 0 || zf.UncompressedSize64 > maxDownload {
+					return errors.New("invalid binary size in the archive")
+				}
 				r, err := zf.Open()
 				if err != nil {
 					return err
 				}
 				defer r.Close()
-				_, err = io.Copy(out, io.LimitReader(r, maxDownload))
+				_, err = io.Copy(out, r)
 				return err
 			}
 		}
@@ -247,7 +248,10 @@ func extract(f *os.File, size int64, isZip bool, out io.Writer) error {
 			return err
 		}
 		if hdr.Typeflag == tar.TypeReg && isBinary(hdr.Name) {
-			_, err = io.Copy(out, io.LimitReader(tr, maxDownload))
+			if hdr.Size <= 0 || hdr.Size > maxDownload {
+				return errors.New("invalid binary size in the archive")
+			}
+			_, err = io.Copy(out, tr)
 			return err
 		}
 	}

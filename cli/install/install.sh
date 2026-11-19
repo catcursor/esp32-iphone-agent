@@ -1,14 +1,13 @@
 #!/bin/sh
-# Installs esp32agent from the release list (https://manina.ai/cli/versions.json), else from GitHub Releases:
-#   curl -fsSL https://raw.githubusercontent.com/onehumanbeing/esp32-iphone-agent/main/cli/install/install.sh | sh
+# Installs a published stable CLI release from catcursor/esp32-iphone-agent.
+#   curl -fsSL https://raw.githubusercontent.com/catcursor/esp32-iphone-agent/sense-usb-lan/cli/install/install.sh | sh
 # Env: ESP32AGENT_VERSION=0.1.0 (default: latest), ESP32AGENT_BIN_DIR (default ~/.local/bin),
-#      ESP32AGENT_VERSIONS_URL (default https://manina.ai/cli/versions.json),
+#      ESP32AGENT_VERSIONS_URL (optional custom versions.json),
 #      ESP32AGENT_ARCHIVE=/path/esp32agent_<os>_<arch>.tar.gz to install a local build (checksums.txt next to it,
 #      or ESP32AGENT_CHECKSUMS=/path), ESP32AGENT_FFMPEG=yes|no to answer the ffmpeg question without a prompt.
 set -eu
 
-REPO=onehumanbeing/esp32-iphone-agent
-VERSIONS_URL=${ESP32AGENT_VERSIONS_URL:-https://manina.ai/cli/versions.json}
+REPO=catcursor/esp32-iphone-agent
 BIN_DIR=${ESP32AGENT_BIN_DIR:-$HOME/.local/bin}
 
 say() { printf '%s\n' "$*"; }
@@ -34,6 +33,43 @@ sha256() {
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# Accept JSON in either compact or pretty-printed form. Pinned and local installs need no JSON tool.
+read_json() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import json, sys
+op, path, version, platform = sys.argv[1:]
+with open(path, encoding="utf-8") as f: doc = json.load(f)
+if op == "tags":
+    for release in doc:
+        if not release["draft"] and not release["prerelease"]: print(release["tag_name"])
+else:
+    version = version or doc["latest"]
+    for release in doc["versions"]:
+        if release["version"] == version:
+            asset = release["assets"][platform]
+            print(asset["url"], asset["sha256"], sep="\n")
+            break
+    else: sys.exit("version missing from custom index")' "$@"
+  elif command -v perl >/dev/null 2>&1 && perl -MJSON::PP -e 1 2>/dev/null; then
+    perl -MJSON::PP -0777 -e '
+      my ($op,$path,$version,$platform) = @ARGV;
+      open my $f, "<", $path or die $!;
+      my $doc = decode_json(<$f>);
+      if ($op eq "tags") {
+        for (@$doc) { print "$_->{tag_name}\n" unless $_->{draft} || $_->{prerelease} }
+      } else {
+        $version ||= $doc->{latest};
+        my ($r) = grep { $_->{version} eq $version } @{$doc->{versions}};
+        my $a = $r->{assets}{$platform};
+        die "asset missing from custom index\n" unless $a->{url} && $a->{sha256};
+        print "$a->{url}\n$a->{sha256}\n";
+      }' "$@"
+  else
+    die "release discovery needs Python 3 or Perl JSON::PP; set ESP32AGENT_VERSION to install a known GitHub release"
+  fi
+}
+
 if [ -n "${ESP32AGENT_ARCHIVE:-}" ]; then
   [ -f "$ESP32AGENT_ARCHIVE" ] || die "no file $ESP32AGENT_ARCHIVE"
   cp "$ESP32AGENT_ARCHIVE" "$tmp/$name"
@@ -43,32 +79,26 @@ if [ -n "${ESP32AGENT_ARCHIVE:-}" ]; then
   say "installing esp32agent from $ESP32AGENT_ARCHIVE"
 else
   version=${ESP32AGENT_VERSION:-}
-  # versions.json: {"latest":"X","versions":[{"version":"X","assets":{"<os>_<arch>":{"url":"…","sha256":"…"}}}]}
-  # (each "version" before its "assets", as the release workflow writes it)
-  flat=$(curl -fsSL "$VERSIONS_URL" 2>/dev/null | tr -d ' \t\r\n') || flat=""
-  if [ -n "$flat" ]; then
-    [ -n "$version" ] || version=$(printf '%s' "$flat" | sed -n 's/.*"latest":"\([^"]*\)".*/\1/p')
-    rel=${flat#*\"version\":\"$version\"}
-    if [ -n "$version" ] && [ "$rel" != "$flat" ]; then
-      rel=${rel%%\"version\":*}
-      asset=${rel#*\"${os}_${arch}\":\{}
-      asset=${asset%%\}*}
-      if [ "$asset" != "$rel" ]; then
-        aurl=$(printf '%s' "$asset" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
-        asha=$(printf '%s' "$asset" | sed -n 's/.*"sha256":"\([0-9a-fA-F]*\)".*/\1/p')
-      fi
-    fi
-  fi
-  if [ -n "${aurl:-}" ] && [ -n "${asha:-}" ]; then
-    say "downloading esp32agent $version ($os/$arch)"
+  if [ -n "${ESP32AGENT_VERSIONS_URL:-}" ]; then
+    curl -fsSL -o "$tmp/index" "$ESP32AGENT_VERSIONS_URL"
+    read_json asset "$tmp/index" "$version" "${os}_${arch}" >"$tmp/asset"
+    aurl=$(sed -n '1p' "$tmp/asset")
+    asha=$(sed -n '2p' "$tmp/asset")
+    [ -n "$aurl" ] && [ -n "$asha" ] || die "no $os/$arch build in the custom index"
     curl -fsSL -o "$tmp/$name" "$aurl" || die "download failed: $aurl"
     printf '%s  %s\n' "$asha" "$name" >"$tmp/checksums.txt"
   else
-    [ -n "$flat" ] && say "no $os/$arch build of ${version:-the latest version} in $VERSIONS_URL; trying GitHub Releases"
     if [ -z "$version" ]; then
-      version=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=50" |
-        sed -n 's/.*"tag_name": *"cli-v\([^"]*\)".*/\1/p' | head -n 1)
-      [ -n "$version" ] || die "no cli-v* release found on github.com/$REPO"
+      page=1
+      while :; do
+        curl -fsSL -D "$tmp/headers" -o "$tmp/page" "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page"
+        read_json tags "$tmp/page" "" "" >>"$tmp/tags"
+        grep -iq '^link:.*rel="next"' "$tmp/headers" || break
+        page=$((page + 1))
+      done
+      version=$(sed -nE 's/^cli-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$/\1/p' "$tmp/tags" |
+        LC_ALL=C sort -t. -k1,1nr -k2,2nr -k3,3nr | sed -n '1p')
+      [ -n "$version" ] || die "no published stable CLI release on github.com/$REPO"
     fi
     url=https://github.com/$REPO/releases/download/cli-v$version
     say "downloading esp32agent $version ($os/$arch)"
@@ -77,7 +107,7 @@ else
   fi
 fi
 
-want=$(awk -v n="$name" '$2 == n || $2 == "*"n { print $1 }' "$tmp/checksums.txt")
+want=$(awk -v n="$name" '{sub(/\r$/,"")} $2 == n || $2 == "*"n { print tolower($1) }' "$tmp/checksums.txt")
 [ -n "$want" ] || die "$name is not listed in checksums.txt"
 got=$(sha256 "$tmp/$name")
 [ "$want" = "$got" ] || die "checksum mismatch for $name (expected $want, got $got)"
@@ -112,11 +142,6 @@ fi
 
 cat <<EOF
 
-Next:
-  1. Plug the board into the iPhone, then within 3 minutes:  esp32agent pair
-  2. On the iPhone: Control Center > Screen Mirroring > ESP32 Agent
-  3. Let your agent use it:
-       claude mcp add esp32agent -- esp32agent mcp
-       codex mcp add esp32agent -- esp32agent mcp
-       esp32agent skill install      (Claude Code skill)
+Connect the board to this computer and run esp32agent pair-usb PORT.
+Replace PORT with the board's serial device. Then run esp32agent device info.
 EOF

@@ -15,8 +15,7 @@ import (
 
 var ErrNotPaired = errors.New("no USB owner profile: run esp32agent pair-usb PORT")
 
-const ownerFile = "owner.dpapi"
-const photoFile = "sense-photo.key.dpapi"
+const photoFile = "sense-photo.key" + credentialSuffix
 
 type Profile struct {
 	ClientID []byte
@@ -155,7 +154,7 @@ func PairLegacyPhoto(port string) error {
 
 func photoAddressFile(key []byte) string {
 	digest := sha256.Sum256(key)
-	return "sense-photo." + hex.EncodeToString(digest[:]) + ".host.dpapi"
+	return "sense-photo." + hex.EncodeToString(digest[:]) + ".host" + credentialSuffix
 }
 
 func saveLegacyPhoto(key []byte, host string) error {

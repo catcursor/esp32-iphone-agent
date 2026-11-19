@@ -10,15 +10,19 @@ follow [mobilecli](https://github.com/mobile-next/mobilecli).
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/onehumanbeing/esp32-iphone-agent/main/cli/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/catcursor/esp32-iphone-agent/sense-usb-lan/cli/install/install.sh | sh
 ```
 
-Windows (PowerShell): `irm https://raw.githubusercontent.com/onehumanbeing/esp32-iphone-agent/main/cli/install/install.ps1 | iex`.
-npm: `npm install -g esp32agent`. The scripts read the release list at `https://manina.ai/cli/versions.json`
-(falling back to GitHub Releases) and check the archive's SHA-256. Screenshots need `ffmpeg` (the installers offer
-brew / apt / dnf / winget). Later: `esp32agent upgrade`.
+Windows (PowerShell): `irm https://raw.githubusercontent.com/catcursor/esp32-iphone-agent/sense-usb-lan/cli/install/install.ps1 | iex`.
+Download a build for macOS Apple Silicon, Windows x64 or Linux x64 from [this fork's releases](https://github.com/catcursor/esp32-iphone-agent/releases). The installers check the SHA-256 of each archive. Use `esp32agent upgrade --check` to check for a newer CLI and `esp32agent upgrade` to install it. For direct LAN control, use the [USB pairing guide](../docs/usb-lan.md).
 
-## Pair
+## Pair over USB
+
+Connect the board to your computer and run `esp32agent pair-usb PORT` with its serial port.
+After pairing, move the board to the iPhone and run `esp32agent device info` over the LAN.
+`esp32agent target HOST` updates the board address saved on the computer.
+
+## Pair over Bluetooth
 
 1. Plug the board into the iPhone. Within 3 minutes: `esp32agent pair`.
 2. On the iPhone: Control Center > Screen Mirroring > ESP32 Agent.
@@ -136,8 +140,4 @@ make -C hardware/tests/sim      # simulated board (the firmware's cli_link.cpp):
 ESP32AGENT_SIM=$PWD/hardware/tests/sim/cli_sim esp32agent screenshot   # the CLI against the simulator
 ```
 
-Release: push a tag `cli-vX.Y.Z`; `.github/workflows/cli.yml` builds darwin (cgo, CoreBluetooth), linux and
-windows (pure Go) for amd64/arm64 and uploads the archives with `checksums.txt`. It also leaves a `versions.json`
-artifact ([format](install/versions.example.json)); merging it into `https://manina.ai/cli/versions.json` is
-manual. `ESP32AGENT_VERSIONS_URL` points `upgrade` and the installers at another list (tests). Installer testing:
-`ESP32AGENT_ARCHIVE=/path/esp32agent_darwin_arm64.tar.gz sh cli/install/install.sh` (checksums.txt next to it).
+Push a stable tag such as `cli-vX.Y.Z` to release all three builds, `checksums.txt` and the versioned [manifest](install/versions.example.json) on this fork's GitHub Releases. Set `ESP32AGENT_VERSIONS_URL` to use a custom manifest.

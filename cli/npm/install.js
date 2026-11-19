@@ -12,7 +12,7 @@ const goos = { darwin: "darwin", linux: "linux", win32: "windows" }[process.plat
 const goarch = { x64: "amd64", arm64: "arm64" }[process.arch];
 if (!goos || !goarch) throw new Error(`esp32agent: unsupported platform ${process.platform}/${process.arch}`);
 const name = `esp32agent_${goos}_${goarch}.${goos === "windows" ? "zip" : "tar.gz"}`;
-const base = `https://github.com/onehumanbeing/esp32-iphone-agent/releases/download/cli-v${version}`;
+const base = `https://github.com/catcursor/esp32-iphone-agent/releases/download/cli-v${version}`;
 
 async function fetchBytes(url) {
   const res = await fetch(url);
@@ -32,14 +32,17 @@ async function main() {
   if (line.trim().split(/\s+/)[0].toLowerCase() !== got) throw new Error(`esp32agent: checksum mismatch for ${name}`);
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "esp32agent-"));
-  const file = path.join(tmp, name);
-  fs.writeFileSync(file, archive);
-  execFileSync("tar", ["-xf", file, "-C", tmp]); // bsdtar on Windows 10+ reads zip too
-  const exe = goos === "windows" ? "esp32agent.exe" : "esp32agent";
-  const dest = path.join(__dirname, "bin", exe);
-  fs.copyFileSync(path.join(tmp, exe), dest);
-  fs.chmodSync(dest, 0o755);
-  fs.rmSync(tmp, { recursive: true, force: true });
+  try {
+    const file = path.join(tmp, name);
+    fs.writeFileSync(file, archive);
+    const exe = goos === "windows" ? "esp32agent.exe" : "esp32agent";
+    execFileSync("tar", ["-xf", file, "-C", tmp, exe]); // Windows bsdtar also reads zip
+    const dest = path.join(__dirname, "bin", exe);
+    fs.copyFileSync(path.join(tmp, exe), dest);
+    fs.chmodSync(dest, 0o755);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
   try {
     execFileSync("ffmpeg", ["-version"], { stdio: "ignore" });
   } catch {

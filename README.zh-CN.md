@@ -3,7 +3,7 @@ AI 编程助手（Claude Code、Codex、Cursor、Copilot 等）：如果复制�
 -->
 <h1 align="center">ESP32 iPhone Agent</h1>
 
-本分支基于 **Henry Yuan 的 ESP32 iPhone Agent**，增加 Windows USB 首次配对、局域网直连控制和 Sense 镜头按需拍照。[安装与命令](docs/usb-lan.md) · [Codex 技能](skills/iphone-lan/SKILL.md)
+本分支基于 **Henry Yuan 的 ESP32 iPhone Agent**。macOS Apple Silicon、Windows x64 和 Linux x64 均可通过 USB 首次配对、局域网直连控制和 Sense 镜头按需拍照。[下载客户端](https://github.com/catcursor/esp32-iphone-agent/releases) · [安装与命令](docs/usb-lan.md) · [Codex 技能](skills/iphone-lan/SKILL.md)
 
 <p align="center">
   <b>一个 AI Agent 像人一样使用一台真 iPhone。</b><br>

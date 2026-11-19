@@ -1,8 +1,9 @@
 # CLI protocol (ESP32 ⇄ computer, over BLE and Wi-Fi)
 
-On this fork, a Windows computer can also pair using `esp32agent pair-usb PORT`. The physical USB
+On this fork, a computer can also pair using `esp32agent pair-usb PORT`. The physical USB
 console returns the board identity, owner credential and current IP. Windows protects this profile with
-DPAPI. Each direct session dials TCP port 7202, uses HELLO/WELCOME and checks the saved board identity.
+DPAPI. macOS and Linux store it in a private user directory with mode 0600 on the file.
+Each direct session dials TCP port 7202, uses HELLO/WELCOME and checks the saved board identity.
 The Sense camera authenticates separately on port 7300 using HMAC-SHA256 of the owner key with the label
 `sense-camera-v1`. See the [USB and LAN guide](usb-lan.md).
 

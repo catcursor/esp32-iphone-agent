@@ -1,13 +1,13 @@
+//go:build windows || darwin || linux
+
 package sensephoto
 
 import (
 	"errors"
 	"fmt"
-	"golang.org/x/sys/windows"
 	"net"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -22,7 +22,7 @@ func Capture(host string, key []byte, output string) (Result, error) {
 		return Result{}, errors.New("no board address saved; specify --host or pair again over USB")
 	}
 	if output == "" {
-		dir, err := windows.KnownFolderPath(windows.FOLDERID_Pictures, windows.KF_FLAG_DONT_VERIFY)
+		dir, err := picturesDir()
 		if err != nil {
 			return Result{}, err
 		}
@@ -76,13 +76,5 @@ func saveJPEG(path string, data []byte) error {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	from, err := syscall.UTF16PtrFromString(tmp.Name())
-	if err != nil {
-		return err
-	}
-	to, err := syscall.UTF16PtrFromString(path)
-	if err != nil {
-		return err
-	}
-	return syscall.MoveFile(from, to)
+	return publishPhoto(tmp.Name(), path)
 }

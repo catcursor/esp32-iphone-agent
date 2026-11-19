@@ -25,7 +25,7 @@ var Version = "dev"
 
 const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board.
 
-  pair-usb PORT                    save this board's owner credential on Windows for direct Wi-Fi control
+  pair-usb PORT                    save this board's owner credential for direct Wi-Fi control
   target HOST                      update the network address of the USB-paired board
   photo [--output PATH]            take a photo with the board's camera
   usb PORT wifi status             show the board's Wi-Fi settings over USB
