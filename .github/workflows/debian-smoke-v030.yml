@@ -1,4 +1,4 @@
-name: Smoke test the published Linux updater
+name: Verify the release manifest update path
 on:
   push:
     branches: ["ci/debian-smoke-cli-v0.3.0"]
@@ -21,11 +21,12 @@ jobs:
           echo "90000efd182f138e681b0b66bdf2f8b3fada40cad4b6278d41ea5879414498d9  $archive" | sha256sum --check
           mkdir isolated
           tar -xf "$archive" -C isolated
-      - name: Check default update feed and replace an isolated binary from the public release
+      - name: Check the explicit public release manifest and replace the isolated binary
         shell: bash
         run: |
           set -euo pipefail
-          unset ESP32AGENT_VERSIONS_URL GITHUB_TOKEN GH_TOKEN
+          unset GITHUB_TOKEN GH_TOKEN
+          export ESP32AGENT_VERSIONS_URL="https://github.com/catcursor/esp32-iphone-agent/releases/download/cli-v0.3.0/versions.json"
           export HOME="$RUNNER_TEMP/isolated-home"
           mkdir -p "$HOME"
           cd isolated
