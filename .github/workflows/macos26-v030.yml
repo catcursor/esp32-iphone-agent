@@ -1,0 +1,69 @@
+name: macOS 26 release build
+
+on:
+  push:
+    branches: [ci/macos26-cli-v0.3.0]
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-26
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      RELEASE_COMMIT: 0f592c2c6583b6f9ae460ed1e5fafdbc2a8d26ad
+    defaults:
+      run:
+        working-directory: cli
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 0f592c2c6583b6f9ae460ed1e5fafdbc2a8d26ad
+          persist-credentials: false
+      - name: Check release source and arm64 host
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test "$(uname -m)" = "arm64"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Install native test dependencies
+        run: brew install ffmpeg mbedtls@3
+      - name: Build the simulated board
+        run: make -C ../hardware/tests/sim cli_sim screen.h264
+      - uses: astral-sh/setup-uv@v6
+      - name: Test the board and native USB client
+        run: |
+          uv run ../hardware/tests/sim/test_cli_sim.py
+          python3 -c 'import os; assert hasattr(os, "openpty")'
+          go vet ./...
+          go test -race -count=1 -v ./...
+      - name: Build and verify the tagged binary
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+        run: |
+          test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = "darwin/arm64"
+          test -z "$(git status --porcelain)"
+          pkg="$RUNNER_TEMP/esp32agent-darwin"
+          mkdir -p "$pkg"
+          binary="$pkg/esp32agent"
+          go build -trimpath -ldflags "-s -w -X github.com/onehumanbeing/esp32-iphone-agent/cli/internal/app.Version=0.3.0" -o "$binary" ./cmd/esp32agent
+          "$binary" version | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"]["version"] == "0.3.0"'
+          go version -m "$binary" | tee "$RUNNER_TEMP/buildinfo.txt"
+          grep -Fq "vcs.revision=$RELEASE_COMMIT" "$RUNNER_TEMP/buildinfo.txt"
+          grep -Fq "vcs.modified=false" "$RUNNER_TEMP/buildinfo.txt"
+          test "$(lipo -archs "$binary")" = "arm64"
+          xcrun vtool -show-build "$binary" | tee "$RUNNER_TEMP/macos-build.txt"
+          minos=$(awk '$1 == "minos" { print $2 }' "$RUNNER_TEMP/macos-build.txt")
+          python3 -c 'import sys; v=tuple(map(int,sys.argv[1].split("."))); assert v <= (15,0,0), v' "$minos"
+          tar -czf "$RUNNER_TEMP/esp32agent_darwin_arm64.tar.gz" -C "$pkg" esp32agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32agent_darwin_arm64
+          path: ${{ runner.temp }}/esp32agent_darwin_arm64.tar.gz
+          if-no-files-found: error
