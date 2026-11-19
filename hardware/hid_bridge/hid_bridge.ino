@@ -529,6 +529,7 @@ void startAirplay() {
 
 void setup() {
   Serial.begin(115200);
+  board_log_begin();
 #if OTA_CRASH_TEST  // flash.sh --crash-test: an image that never comes up, to check the rollback after an update
   delay(3000);
   abort();

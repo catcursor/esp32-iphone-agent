@@ -6,6 +6,7 @@
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <memory>
 
 namespace {
 std::atomic_flag capturing = ATOMIC_FLAG_INIT;
@@ -68,7 +69,9 @@ bool is_jpeg(const uint8_t *data, size_t len) {
          data[len - 2] == 0xff && data[len - 1] == 0xd9;
 }
 
-esp_err_t deliver_frame(SenseCameraFrameHandler handler, void *context) {
+using JpegBuffer = std::unique_ptr<uint8_t, decltype(&heap_caps_free)>;
+
+esp_err_t capture_frame(SenseCameraFrame &frame, JpegBuffer &jpeg) {
   sensor_t *sensor = esp_camera_sensor_get();
   if (!sensor) return ESP_ERR_NOT_FOUND;
   const camera_sensor_info_t *info = esp_camera_sensor_get_info(&sensor->id);
@@ -88,8 +91,16 @@ esp_err_t deliver_frame(SenseCameraFrameHandler handler, void *context) {
   if (!fb) return ESP_ERR_TIMEOUT;
   esp_err_t result = ESP_ERR_INVALID_RESPONSE;
   if (fb->format == PIXFORMAT_JPEG && is_jpeg(fb->buf, fb->len)) {
-    const SenseCameraFrame frame{fb->buf, fb->len, fb->width, fb->height, info->name};
-    result = handler(frame, context);
+    // Keep only the finished JPEG during network I/O. The driver owns its DMA
+    // descriptors, internal task stack and framebuffer until esp_camera_deinit.
+    jpeg.reset((uint8_t *)heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (jpeg) {
+      memcpy(jpeg.get(), fb->buf, fb->len);
+      frame = {jpeg.get(), fb->len, fb->width, fb->height, info->name};
+      result = ESP_OK;
+    } else {
+      result = ESP_ERR_NO_MEM;
+    }
   }
   esp_camera_fb_return(fb);
   return result;
@@ -103,11 +114,19 @@ esp_err_t sense_camera_capture(SenseCameraFrameHandler handler, void *context) {
   if (!esp_camera_get_psram_mode()) esp_camera_set_psram_mode(true);
   const camera_config_t config = camera_config();
   log_heap("before init");
+  SenseCameraFrame frame{};
+  JpegBuffer jpeg(nullptr, heap_caps_free);
   esp_err_t result = esp_camera_init(&config);
   if (result == ESP_OK) {
-    result = deliver_frame(handler, context);
+    result = capture_frame(frame, jpeg);
     esp_err_t cleanup = esp_camera_deinit();
     if (result == ESP_OK) result = cleanup;
+  }
+  if (result == ESP_OK) {
+    result = handler(frame, context);
+  } else {
+    board_log("camera capture failed: %s", esp_err_to_name(result));
+    log_heap("after failure");
   }
   capturing.clear();
   return result;

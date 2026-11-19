@@ -2,6 +2,8 @@
 #include "photo_link.h"
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_heap_caps.h>
+#include <memory>
 #include "lwip/sockets.h"
 #include "wifi_video.h"
 #include "logbuf.h"
@@ -74,6 +76,13 @@ static void session(int c) {
     if (wv_token() != tok) return fail(c, "wrong token");
     if (strlen(md5) != 32) return fail(c, "bad md5");
   }
+  // Only firmware uploads need a receive buffer. Ordinary AirPlay/camera traffic
+  // otherwise has to compete with 4 KiB of permanently reserved internal RAM.
+  constexpr size_t blockSize = 4096;
+  std::unique_ptr<uint8_t, decltype(&heap_caps_free)> buf(
+      (uint8_t *)heap_caps_malloc_prefer(blockSize, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT), heap_caps_free);
+  if (!buf) return fail(c, "no memory for update buffer");
   if (!Update.begin(size, U_FLASH)) return fail(c, Update.errorString());
   if (!signedImage) Update.setMD5(md5);
   static mbedtls_sha256_context hash;
@@ -82,12 +91,11 @@ static void session(int c) {
   busy = true;
   reply(c, "ok\n");
   board_log("ota: receiving %lu bytes", size);
-  static uint8_t buf[4096];
   for (size_t got = 0; got < size;) {
-    int n = recv(c, buf, size - got < sizeof buf ? size - got : sizeof buf, 0);
+    int n = recv(c, buf.get(), size - got < blockSize ? size - got : blockSize, 0);
     if (n <= 0) { busy = false; return fail(c, "connection lost"); }
-    if (Update.write(buf, n) != (size_t)n) { busy = false; return fail(c, Update.errorString()); }
-    if (signedImage) mbedtls_sha256_update(&hash, buf, n);
+    if (Update.write(buf.get(), n) != (size_t)n) { busy = false; return fail(c, Update.errorString()); }
+    if (signedImage) mbedtls_sha256_update(&hash, buf.get(), n);
     got += n;
   }
   if (signedImage) {

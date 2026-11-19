@@ -1,14 +1,22 @@
 #include "logbuf.h"
+#include <esp_heap_caps.h>
 #include <stdarg.h>
 #include "src/log/logring.h"
 
 static const size_t RING_SIZE = 8192;
 static const size_t PAGE_MAX = 400;  // escaped text per reply; under the reply cap (514) with the header
-static char ringBuf[RING_SIZE];
-static logring ring = {ringBuf, RING_SIZE, 0, 0};
+static logring ring{};
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
+void board_log_begin() {
+  // Keep internal DMA-capable RAM available for the camera and Wi-Fi during mirroring.
+  char *storage = (char *)heap_caps_malloc_prefer(RING_SIZE, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (storage) logring_init(&ring, storage, RING_SIZE);
+}
+
 void board_log_keep(const char *line) {
+  if (!ring.buf) return;
   char stamped[300];
   uint32_t ms = millis();
   snprintf(stamped, sizeof stamped, "[%lu.%03lu] %s", (unsigned long)(ms / 1000), (unsigned long)(ms % 1000), line);

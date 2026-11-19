@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
+// Allocate the RAM log before starting the board's workers.
+void board_log_begin();
 // A board log line: printed to USB serial and kept in the RAM log the app and the CLI read with `logs`.
 // Never log secrets (Wi-Fi password, OTA token, pairing keys): the RAM log goes to anyone paired.
 void board_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
