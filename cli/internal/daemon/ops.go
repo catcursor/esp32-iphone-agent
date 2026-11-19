@@ -28,8 +28,7 @@ var (
 
 func num(v any) float64 { f, _ := v.(float64); return f }
 
-// videoState explains why there is no usable screen, nil when mirroring streams.
-func (s *Server) videoState(ctx context.Context, c *Conn) error {
+func (c *Conn) waitForStatus(ctx context.Context) error {
 	for i := 0; i < 30; i++ { // the first status arrives within a second of connecting
 		if _, age := c.Status(); age >= 0 {
 			break
@@ -37,6 +36,14 @@ func (s *Server) videoState(ctx context.Context, c *Conn) error {
 		if sleepCtx(ctx, 100*time.Millisecond) != nil {
 			return ctx.Err()
 		}
+	}
+	return nil
+}
+
+// videoState explains why there is no usable screen, nil when mirroring streams.
+func (s *Server) videoState(ctx context.Context, c *Conn) error {
+	if err := c.waitForStatus(ctx); err != nil {
+		return err
 	}
 	st, _ := c.Status()
 	if num(st["fz"]) == 1 {

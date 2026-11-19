@@ -35,6 +35,7 @@
 #include "src/net/lan_lock.h"
 #include "src/cli/cli_proto.h"
 #include "logbuf.h"
+#include "photo_link.h"
 
 const int STEP = 10;      // pointer speed per report while moving (any direction, see pace.h)
 const int ABS_STEP = 245;      // of 32767, per STEP_MS while dragging with `abs`: the relative mouse's speed
@@ -308,7 +309,8 @@ String board(const String &line, const String &id, char who) {
   long a = 0, b = 0;
   int n = sscanf(arg.c_str(), "%ld %ld", &a, &b);
   // Getting the board back on a network outranks the app's use of it (2026-11-11): `net` goes through.
-  if (who == FROM_CLI && !arb_allowed(ARB_CLI, ble_app_active()) && cmd != "crash" && cmd != "net") return APP_BUSY;
+  if (who == FROM_CLI && !arb_allowed(ARB_CLI, ble_app_active()) &&
+      cmd != "crash" && cmd != "net" && cmd != "ipv4") return APP_BUSY;
   if (cmd == "stream") {
     if (arg != "on" && arg != "off") return "err usage: stream on|off";
     video_stream(arg == "on", who);
@@ -318,11 +320,15 @@ String board(const String &line, const String &id, char who) {
   if (who == FROM_CLI && (cmd == "app" || cmd == "log" || cmd == "unpair" || cmd == "res" || cmd == "fps" ||
                           cmd == "txpower" || cmd == "coex"))
     return "err not available from the CLI";
+  if (cmd == "ipv4" && who == FROM_CLI) return net_ipv4(arg);
   if (cmd == "net" && who == FROM_CLI) {  // the board's Wi-Fi for the CLI's link (docs/cli-protocol.md, "Wi-Fi link")
+    if (arg == "hotspot-password") {
+      String reply = net_hotspot_password();
+      return reply.startsWith("err ") ? reply : "ok " + reply;
+    }
     if (arg.length()) {
       if (!arg.startsWith("{")) return "err usage: net [{\"mode\":\"ap\"} | {\"mode\":\"sta\",\"ssid\":...,\"pass\":...}]";
-      net_request(arg);  // applied by net_poll(): the reply goes out first
-      return "ok";
+      return net_request(arg, cli_wifi()) ? "ok" : "err invalid Wi-Fi settings";
     }
     return "ok " + net_json(false);
   }
@@ -398,6 +404,9 @@ String board(const String &line, const String &id, char who) {
     return String("ok ") + (lan_owner() ? ip : "none") + (lan_locked() ? " locked" : "");
   }
   if (cmd == "unpair") {
+    const bool ownerErased = cli_forget_owner();
+    const bool photoErased = photo_forget_key();
+    if (!ownerErased || !photoErased) return "err could not erase USB pairings; retry unpair";
     ble_reply(id + " ok");  // answer before the link goes down
     ble_unpair();
     return "";
@@ -611,9 +620,20 @@ void loop() {
     line = serialLine;
     serialLine = "";
     line.trim();
-    if (line.startsWith("0 net ")) { net_request(line.substring(6)); Serial.println("0 ok"); return; }
+    if (line.startsWith("0 net ")) {
+      Serial.println(net_request(line.substring(6)) ? "0 ok" : "0 err invalid Wi-Fi settings");
+      return;
+    }
     if (line == "0 netinfo") { Serial.println("0 " + net_json(true)); return; }  // what the app reads over BLE (incl. vtok)
+    if (line == "0 netstatus") { Serial.println("0 " + net_json(false)); return; }
+    if (line == "0 hotspot-password") { Serial.println("0 " + net_hotspot_password()); return; }
     if (line == "0 status") { Serial.println("0 " + statusJson(true, FROM_APP)); return; }
+    if (line == "0 owner-pair") { cli_usb_owner_pair(net_ip()); return; }
+    if (line == "0 ipv4" || line.startsWith("0 ipv4 ")) {
+      Serial.println("0 " + net_ipv4(line.substring(7)));
+      return;
+    }
+    if (line == "0 photo-key") { photo_usb_pair(); return; }
     int sp = line.indexOf(' ');
     String id = sp < 0 ? line : line.substring(0, sp);
     Serial.println(id + " " + board(sp < 0 ? "" : line.substring(sp + 1), id, FROM_APP));
@@ -632,11 +652,17 @@ void loop() {
 #endif
   String reply = id.toInt() || id == "0" ? board(rest, id, who) : "err missing request id";
   if (reply.length()) {
-    if (!rest.startsWith("result")) keepReply(id, reply, who);
+    // A hotspot settings reply can contain the password, including when read via result later.
+    if (rest != "net hotspot-password" && !rest.startsWith("result")) keepReply(id, reply, who);
     ble_reply_timing(recv, popped - recv, millis() - popped);
     ble_reply(id + " " + reply, who);
   }
 #if DEBUG_SERIAL
-  Serial.printf("%s -> %s (%lu ms)\n", line.c_str(), reply.c_str(), millis() - started);
+  if (rest == "net" || rest.startsWith("net ") || rest.startsWith("netinfo") ||
+      rest.startsWith("owner-pair") || rest.startsWith("photo-key")) {
+    Serial.printf("network/pairing request (%lu ms)\n", millis() - started);
+  } else {
+    Serial.printf("%s -> %s (%lu ms)\n", line.c_str(), reply.c_str(), millis() - started);
+  }
 #endif
 }

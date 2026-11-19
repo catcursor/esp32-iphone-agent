@@ -14,22 +14,37 @@ import (
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
 )
 
-// netJoin is `net join` without arguments: over the BLE session, ask for the Wi-Fi's name and password (not
-// echoed, not in the shell history), send them to the board, and wait until the CLI's link moves to that Wi-Fi.
-func (a *App) netJoin(dev string) int {
+// netJoin reads Wi-Fi credentials from the console and sends them over the current authenticated session.
+func (a *App) netJoin(dev, ssid string) int {
 	in := a.In
 	if in == nil {
 		in = os.Stdin
 	}
 	r := bufio.NewReader(in)
-	if _, err := a.Client.Call(daemon.Request{Cmd: "net", Device: dev}); err != nil { // connected over BLE first
+	call := func(text string) ([]byte, error) {
+		line, err := a.Client.Call(daemon.Request{Cmd: "net", Device: dev, Text: text})
+		if err != nil {
+			return nil, err
+		}
+		var response daemon.Response
+		if err := json.Unmarshal(line, &response); err != nil {
+			return nil, err
+		}
+		if response.Status != "ok" {
+			return nil, errors.New(response.Error)
+		}
+		return line, nil
+	}
+	if _, err := call(""); err != nil {
 		return a.fail(err)
 	}
-	fmt.Fprint(a.Err, "Wi-Fi name (SSID): ")
-	ssid, _ := r.ReadString('\n')
-	ssid = strings.TrimRight(ssid, "\r\n")
 	if ssid == "" {
-		return a.fail(errors.New("no Wi-Fi name given"))
+		fmt.Fprint(a.Err, "Wi-Fi name (SSID): ")
+		ssid, _ = r.ReadString('\n')
+		ssid = strings.TrimRight(ssid, "\r\n")
+		if ssid == "" {
+			return a.fail(errors.New("no Wi-Fi name given"))
+		}
 	}
 	fmt.Fprint(a.Err, "Password (empty for an open network): ")
 	var pass string
@@ -41,16 +56,31 @@ func (a *App) netJoin(dev string) int {
 		}
 		pass = string(b)
 	} else {
-		pass, _ = r.ReadString('\n')
+		line, err := r.ReadString('\n')
+		if err != nil && line == "" {
+			return a.fail(errors.New("no password line supplied; enter a blank line for an open network"))
+		}
+		pass = line
 		pass = strings.TrimRight(pass, "\r\n")
 	}
-	if _, err := a.Client.Call(daemon.Request{Cmd: "net", Device: dev, Text: "join " + ssid + "\x00" + pass}); err != nil {
+	joined, err := call("join " + ssid + "\x00" + pass)
+	if err != nil {
 		return a.fail(err)
 	}
-	fmt.Fprintf(a.Err, "Sent over Bluetooth. The board is joining %q; put the iPhone on the same Wi-Fi to mirror.\n", ssid)
+	fmt.Fprintf(a.Err, "The board accepted the request to join %q.\n", ssid)
+	var change struct {
+		Data struct {
+			Accepted bool `json:"accepted"`
+		} `json:"data"`
+	}
+	json.Unmarshal(joined, &change)
+	if change.Data.Accepted {
+		a.Out.Write(joined)
+		return 0
+	}
 	var last []byte
 	for deadline := time.Now().Add(45 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
-		line, err := a.Client.Call(daemon.Request{Cmd: "net", Device: dev})
+		line, err := call("")
 		if err != nil {
 			continue
 		}
@@ -61,18 +91,22 @@ func (a *App) netJoin(dev string) int {
 				Board struct {
 					Mode string `json:"mode"`
 					IP   string `json:"ip"`
+					SSID string `json:"ssid"`
 				} `json:"board"`
 			} `json:"data"`
 		}
 		json.Unmarshal(line, &resp)
-		if d := resp.Data; d.Via == "wifi" {
-			fmt.Fprintf(a.Err, "Done: commands and video now go over Wi-Fi (%s).\n", d.Board.IP)
+		d := resp.Data
+		if d.Board.SSID != ssid || d.Board.Mode != "sta" || d.Board.IP == "" || d.Board.IP == "0.0.0.0" {
+			continue
+		}
+		if d.Via == "wifi" {
+			fmt.Fprintf(a.Err, "Commands and video now use Wi-Fi (%s).\n", d.Board.IP)
 			a.waitMirroring(dev)
 			a.Out.Write(line)
 			return 0
-		} else if d.Board.Mode == "sta" && d.Board.IP != "" && d.Board.IP != "0.0.0.0" {
-			fmt.Fprintf(a.Err, "board is on Wi-Fi at %s; moving the link...\n", d.Board.IP)
 		}
+		fmt.Fprintf(a.Err, "The board joined the network at %s. Waiting for the Wi-Fi connection.\n", d.Board.IP)
 	}
 	if last != nil {
 		a.Out.Write(last)

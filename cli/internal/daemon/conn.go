@@ -60,7 +60,7 @@ type Conn struct {
 	keyMu   sync.Mutex // held across the gap and the send of key/type commands
 	lastKey time.Time  // when the board acknowledged the last one
 
-	wifi *wifiLink // moves the session to the board's Wi-Fi and back (wifi.go); nil: BLE only
+	wifi *wifiLink // moves BLE-paired sessions to Wi-Fi and back; nil for direct sessions
 
 	hear      *hearing    // phone audio transcribed here (listen.go); nil: never
 	rawWanted func() bool // ask each session for the raw audio
@@ -99,6 +99,12 @@ func (c *Conn) attach(s *proto.Session, via string, l proto.Link) error {
 		c.bleLink = l
 	}
 	c.re = video.NewReassembler()
+	if via == "wifi" && c.wifi == nil {
+		// A reconnect can follow a reboot. Its clock, screen and status belong to the new session.
+		c.offset, c.frame, c.config, c.gop = nil, nil, nil, nil
+		c.captured, c.updated, c.changed = time.Time{}, time.Time{}, time.Time{}
+		c.status, c.statusAt = map[string]any{}, time.Time{}
+	}
 	if c.dec != nil { // the new stream starts over from the GOP
 		c.dec.Close()
 		c.dec = nil

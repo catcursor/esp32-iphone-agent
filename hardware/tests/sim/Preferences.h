@@ -2,11 +2,17 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <string>
 struct Preferences {
   bool begin(const char *ns, bool readOnly);
   void end() {}
   size_t putBytes(const char *key, const void *p, size_t n);
   size_t getBytes(const char *key, void *p, size_t n);
+  bool isKey(const char *key);
+  size_t getBytesLength(const char *key);
+  bool clear();
   size_t putUChar(const char *key, uint8_t v);
   uint8_t getUChar(const char *key, uint8_t def);
+ private:
+  std::string prefix;
 };

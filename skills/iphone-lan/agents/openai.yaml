@@ -1,0 +1,4 @@
+interface:
+  display_name: "iPhone LAN"
+  short_description: "Control a paired iPhone and Sense camera over the LAN"
+  default_prompt: "Use $iphone-lan to operate my paired iPhone over the local network."

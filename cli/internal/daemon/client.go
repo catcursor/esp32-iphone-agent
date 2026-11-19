@@ -133,5 +133,18 @@ func (c *Client) StopRunning() bool {
 	}
 	conn.Close()
 	_, err = c.roundTrip(Request{Cmd: "stop"})
-	return err == nil
+	if err != nil {
+		return false
+	}
+	// The reply precedes listener shutdown. After a target change or USB pairing
+	// the next command must start a new daemon instead of reusing the old profile.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		check, err := c.dial()
+		if err != nil {
+			return true
+		}
+		check.Close()
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
 }

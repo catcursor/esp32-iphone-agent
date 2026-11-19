@@ -4,8 +4,11 @@
 #include <esp_heap_caps.h>
 #include <esp_mac.h>
 #include <esp_random.h>
+#include <mbedtls/md.h>
+#include <mbedtls/platform_util.h>
 #include "ble_link.h"
 #include "cli_tcp.h"
+#include "usb_pairing.h"
 #include "src/cli/cli_proto.h"
 #include "logbuf.h"
 
@@ -16,6 +19,14 @@ const uint32_t VIDEO_TIMEOUT_MS = 1500;    // as for the app's video
 
 struct PairedClient {
   uint8_t id[CLI_ID_LEN], key[CLI_KEY_LEN];
+};
+// The USB owner does not take one of the rotating BLE pairing slots.
+static const int OWNER_CLIENT = MAX_CLIENTS;
+static const char OWNER_NAMESPACE[] = "usb-owner";
+static const char OWNER_RECORD[] = "pair-v1";
+static std::atomic<bool> ownerRevoked{false};
+struct OwnerCredential : PairedClient {
+  ~OwnerCredential() { mbedtls_platform_zeroize(key, sizeof key); }
 };
 struct Session {
   volatile bool welcomed, authed;
@@ -39,6 +50,58 @@ const size_t AUDIO_CAP = 1400 + CLI_OVERHEAD;  // one record: header, times, an 
 const size_t BUF_SIZE = TEXT_CAP * 3 + OUT_CAP + VIDEO_CAP + AUDIO_CAP;
 
 extern "C" void cli_random(uint8_t *p, size_t n) { esp_fill_random(p, n); }
+
+static bool loadOwner(OwnerCredential &owner, bool provision = false) {
+  const bool revoked = ownerRevoked.load();
+  if (revoked && !provision) return false;
+  Preferences storage;
+  if (!storage.begin(OWNER_NAMESPACE, !provision)) return false;
+  // Store the owner identity and root key in one NVS commit, including on first pairing.
+  PairedClient &record = owner;
+  if (!revoked && storage.isKey(OWNER_RECORD))
+    return storage.getBytesLength(OWNER_RECORD) == sizeof record &&
+           storage.getBytes(OWNER_RECORD, &record, sizeof record) == sizeof record && !ownerRevoked.load();
+  if (!provision) return false;
+  esp_fill_random(&record, sizeof record);
+  if (storage.putBytes(OWNER_RECORD, &record, sizeof record) != sizeof record) return false;
+  ownerRevoked.store(false);
+  return true;
+}
+
+static void hexEncode(const uint8_t *bytes, size_t size, char *out) {
+  static const char digits[] = "0123456789abcdef";
+  for (size_t i = 0; i < size; ++i) {
+    *out++ = digits[bytes[i] >> 4];
+    *out++ = digits[bytes[i] & 15];
+  }
+  *out = 0;
+}
+
+void cli_usb_owner_pair(const String &ip) {
+  OwnerCredential owner;
+  if (!rxText[0] || !loadOwner(owner, true)) {
+    Serial.println("0 err USB owner pairing unavailable");
+    return;
+  }
+  char client[2 * CLI_ID_LEN + 1], board[2 * sizeof boardId + 1], key[2 * CLI_KEY_LEN + 1];
+  hexEncode(owner.id, sizeof owner.id, client);
+  hexEncode(boardId, sizeof boardId, board);
+  hexEncode(owner.key, sizeof owner.key, key);
+  char reply[192];
+  snprintf(reply, sizeof reply, "0 {\"id\":\"%s\",\"board\":\"%s\",\"key\":\"%s\",\"ip\":\"%s\"}",
+           client, board, key, ip.c_str());
+  Serial.println(reply);
+  mbedtls_platform_zeroize(key, sizeof key);
+  mbedtls_platform_zeroize(reply, sizeof reply);
+}
+
+bool cli_owner_photo_key(uint8_t key[CLI_KEY_LEN]) {
+  OwnerCredential owner;
+  if (!loadOwner(owner)) return false;
+  static const uint8_t label[] = "sense-camera-v1";
+  return mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), owner.key, sizeof owner.key,
+                         label, sizeof label - 1, key) == 0;
+}
 
 static void saveClients() {
   prefs.begin("cli", false);
@@ -75,6 +138,15 @@ void cli_begin() {
   nextClient = prefs.getUChar("next", 0);
   if (prefs.getBytes("c", clients, sizeof clients) != sizeof clients || clientCount > MAX_CLIENTS) clientCount = nextClient = 0;
   prefs.end();
+}
+
+bool cli_forget_owner() {
+  bool erased = forgetUsbPairing(OWNER_NAMESPACE, ownerRevoked);
+  if (sessions[CLI_TCP_SLOT].welcomed && sessions[CLI_TCP_SLOT].client == OWNER_CLIENT) {
+    cli_reset(CLI_TCP_SLOT);
+    drop(CLI_TCP_SLOT);
+  }
+  return erased;
 }
 
 void cli_forget_all() {
@@ -129,19 +201,22 @@ static void pair(int slot, const uint8_t *p, size_t n) {
 
 static void hello(int slot, const uint8_t *p, size_t n) {
   if (n != CLI_ID_LEN + CLI_NONCE_LEN) return error(slot, "bad hello");
-  int c = findClient(p);
+  OwnerCredential owner;
+  const bool usbOwner = slot == CLI_TCP_SLOT && loadOwner(owner) && !memcmp(owner.id, p, CLI_ID_LEN);
+  int c = usbOwner ? OWNER_CLIENT : findClient(p);
   if (c < 0) return error(slot, "not paired");
+  const uint8_t *key = usbOwner ? owner.key : clients[c].key;
   Session &s = sessions[slot];
   uint8_t bn[CLI_NONCE_LEN], out[CLI_NONCE_LEN + 6 + CLI_MAC_LEN];
   esp_fill_random(bn, sizeof bn);
   s.authed = false;
-  if (!cli_session(clients[c].key, p + CLI_ID_LEN, bn, s.c2b, s.b2c)) return error(slot, "session failed");
+  if (!cli_session(key, p + CLI_ID_LEN, bn, s.c2b, s.b2c)) return error(slot, "session failed");
   s.client = c;
   s.rx = s.txCtrl = s.txVideo = s.txAudio = 0;
   s.welcomed = true;
   memcpy(out, bn, CLI_NONCE_LEN);
   memcpy(out + CLI_NONCE_LEN, boardId, 6);
-  cli_mac(clients[c].key, "hello", p + CLI_ID_LEN, CLI_NONCE_LEN, bn, CLI_NONCE_LEN, out + CLI_NONCE_LEN + 6);
+  cli_mac(key, "hello", p + CLI_ID_LEN, CLI_NONCE_LEN, bn, CLI_NONCE_LEN, out + CLI_NONCE_LEN + 6);
   plain(slot, CLI_WELCOME, out, sizeof out);
 }
 
@@ -150,6 +225,7 @@ static void data(int slot, const uint8_t *p, size_t n) {
   uint8_t *text = rxText[slot == CLI_TCP_SLOT];
   uint32_t ctr;
   if (!s.welcomed || !text || n > TEXT_CAP + CLI_OVERHEAD) return;
+  if (s.client == OWNER_CLIENT && ownerRevoked.load()) { drop(slot); return; }
   int len = cli_open(s.c2b, 'C', p, n, &ctr, text);
   if (len < 0) return;  // forged or for another session: ignore
   if (ctr != s.rx + 1) { drop(slot); return; }  // a replay, or a lost frame: start over

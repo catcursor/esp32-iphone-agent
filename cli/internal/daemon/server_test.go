@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,11 @@ func (f fakeTransport) Connect(context.Context, ble.Found) (proto.Link, error) {
 func start(t *testing.T, tr ble.Transport) (*Client, *Server) { return startWith(t, tr, nil) }
 
 func startWith(t *testing.T, tr ble.Transport, dial func(context.Context, string) (proto.Link, error)) (*Client, *Server) {
-	dir, err := os.MkdirTemp("/tmp", "e32a")
+	base := "/tmp" // keep AF_UNIX paths short on macOS
+	if runtime.GOOS == "windows" {
+		base = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(base, "e32a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +94,11 @@ func TestPairInfoAndBusy(t *testing.T) {
 		t.Fatal("key not stored")
 	}
 	st, err := os.Stat(s.Dir + "/config.json")
-	if err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("config.json mode %v %v", st.Mode(), err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
+		t.Fatalf("config.json mode %v", st.Mode())
 	}
 
 	b.Status(`{"fw":"0.2.1","up":5000,"ap":"idle","fz":0,"busy":0,"ble":{"mtu":247,"n":2}}`)

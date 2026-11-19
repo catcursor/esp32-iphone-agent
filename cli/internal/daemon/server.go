@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/ble"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/history"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/owner"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/proto"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/video"
 )
@@ -50,6 +52,7 @@ func fail(err error) Response { return Response{Status: "error", Error: err.Erro
 
 type Server struct {
 	Transport ble.Transport
+	Owner     *owner.Profile // physical USB pairing for the default, direct TCP board
 	Config    *config.Config
 	Dir       string
 	Version   string
@@ -169,8 +172,14 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 	case "devices":
 		return s.devices(ctx)
 	case "pair":
+		if s.Owner != nil {
+			return fail(errors.New("the selected board is USB-paired; run esp32agent pair-usb PORT to refresh its profile"))
+		}
 		return s.pair(ctx, req.Device)
 	case "unpair":
+		if s.Owner != nil {
+			return fail(errors.New("unpair manages legacy Bluetooth pairing; USB owner profiles are managed with pair-usb"))
+		}
 		return s.unpair(req.Device)
 	}
 	c, err := s.conn(ctx, req.Device)
@@ -179,8 +188,14 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 	}
 	switch req.Cmd {
 	case "info":
+		if s.Owner != nil {
+			if err := c.waitForStatus(ctx); err != nil {
+				return fail(err)
+			}
+		}
 		st, age := c.Status()
 		st["id"], st["name"] = c.ID, c.Name
+		st["via"] = c.Via()
 		l := s.Config.GetListen()
 		st["listen"] = map[string]any{"on": l.On, "mode": l.ListenMode()}
 		if age >= 0 {
@@ -198,6 +213,14 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 		c.pointer(s.Dir).Forget()
 		if err != nil {
 			return fail(err)
+		}
+		if strings.TrimSpace(req.Text) == "net" {
+			board, err := owner.ParseNetwork([]byte(reply))
+			if err != nil {
+				return fail(err)
+			}
+			raw, _ := json.Marshal(board)
+			reply = string(raw)
 		}
 		return ok(map[string]string{"reply": reply})
 	case "boardlog":
@@ -221,6 +244,18 @@ type deviceInfo struct {
 }
 
 func (s *Server) devices(ctx context.Context) Response {
+	if s.Owner != nil {
+		id := idHex(s.Owner.BoardID)
+		s.mu.Lock()
+		c := s.conns[id]
+		connected := c != nil && c.connected()
+		s.mu.Unlock()
+		state := "paired"
+		if connected {
+			state = "online"
+		}
+		return ok(map[string]any{"devices": []deviceInfo{{id, s.ownerName(), "ios", "esp32agent", state, true, connected}}, "host": s.Owner.Host})
+	}
 	list := []deviceInfo{}
 	seen := map[string]bool{}
 	s.mu.Lock()
@@ -324,6 +359,13 @@ func (s *Server) appBusy() bool {
 
 // conn returns the connected board for sel, connecting (scan + HELLO) if needed.
 func (s *Server) conn(ctx context.Context, sel string) (*Conn, error) {
+	if p := s.Owner; p != nil {
+		id := idHex(p.BoardID)
+		if sel == "" || strings.EqualFold(sel, id) || len(sel) == 4 && strings.HasSuffix(id, strings.ToLower(sel)) {
+			return s.openDirect(ctx)
+		}
+		return nil, fmt.Errorf("device %s does not match the USB-paired board %s", sel, id)
+	}
 	var live []*Conn
 	s.mu.Lock()
 	for id, c := range s.conns {
@@ -372,33 +414,88 @@ func (s *Server) open(ctx context.Context, f ble.Found, sel string, l proto.Link
 		sess.Close()
 		return nil, fmt.Errorf("board %s not found (found %s)", sel, id)
 	}
+	return s.attachSession(id, f.Name, sess, "ble", l)
+}
+
+func (s *Server) ownerName() string {
+	return "ESP32 Agent " + strings.ToUpper(idHex(s.Owner.BoardID[4:]))
+}
+
+// Direct sessions authenticate the board originally paired over USB before sending any command.
+// Serialize connection creation and check for an existing session inside the lock: simultaneous
+// callers must share the connection (the board accepts one TCP client at a time).
+func (s *Server) openDirect(ctx context.Context) (*Conn, error) {
+	s.linkMu.Lock()
+	defer s.linkMu.Unlock()
+	p := s.Owner
+	id := idHex(p.BoardID)
+	s.mu.Lock()
+	c := s.conns[id]
+	s.mu.Unlock()
+	if c != nil && c.connected() {
+		return c, nil
+	}
+	if s.appBusy() {
+		return nil, ErrAppBusy
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if p.Host == "" {
+		return nil, errors.New("the USB-paired board has no saved address; run esp32agent target HOST or esp32agent pair-usb PORT after configuring its Wi-Fi")
+	}
+	dial := s.DialWiFi
+	if dial == nil {
+		dial = ble.DialWiFi
+	}
+	link, err := dial(ctx, p.Host)
+	if err != nil {
+		return nil, fmt.Errorf("connect to paired board at %s: %w", p.Host, err)
+	}
+	session, err := proto.Hello(ctx, link, p.ClientID, func(board []byte) []byte {
+		if bytes.Equal(board, p.BoardID) {
+			return p.Key
+		}
+		return nil
+	})
+	if err != nil {
+		link.Close()
+		return nil, fmt.Errorf("could not authenticate USB-paired board %s at %s; check the address and refresh the credential with esp32agent pair-usb PORT if needed", id, p.Host)
+	}
+	return s.attachSession(id, s.ownerName(), session, "wifi", link)
+}
+
+// Called under linkMu. BLE connections may migrate between transports; direct connections
+// keep no BLE link and reconnect over TCP on the next request after a disconnect.
+func (s *Server) attachSession(id, name string, sess *proto.Session, via string, l proto.Link) (*Conn, error) {
 	s.mu.Lock()
 	c := s.conns[id]
 	if c == nil {
 		ff, _ := video.FFmpeg()
-		c = newConn(id, f.Name, ff)
+		c = newConn(id, name, ff)
 		c.onApp = s.noteApp
 		s.hearingFor(c)
-		dial := s.DialWiFi
-		if dial == nil {
-			dial = ble.DialWiFi
-		}
-		c.wifi = newWifiLink(dial, func(ctx context.Context, l proto.Link) (*proto.Session, error) {
-			return proto.Hello(ctx, l, s.Config.ClientIDBytes(), s.Config.Key)
-		})
-		if s.WiFiCheck > 0 {
-			c.wifi.every = s.WiFiCheck
-		}
-		go c.wifi.run(c)
 		s.conns[id] = c
+		if via == "ble" {
+			dial := s.DialWiFi
+			if dial == nil {
+				dial = ble.DialWiFi
+			}
+			c.wifi = newWifiLink(dial, func(ctx context.Context, l proto.Link) (*proto.Session, error) {
+				return proto.Hello(ctx, l, s.Config.ClientIDBytes(), s.Config.Key)
+			})
+			if s.WiFiCheck > 0 {
+				c.wifi.every = s.WiFiCheck
+			}
+			go c.wifi.run(c)
+		}
 	}
 	s.mu.Unlock()
-	c.attach(sess, "ble", l)
+	c.attach(sess, via, l)
 	if err := c.start(); err != nil {
 		c.detach(sess, err)
 		return nil, fmt.Errorf("board %s did not answer: %w", id, err)
 	}
-	log.Printf("%s: connected (%s)", id, f.Name)
+	log.Printf("%s: connected over %s (%s)", id, via, name)
 	return c, nil
 }
 

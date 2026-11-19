@@ -1,5 +1,13 @@
 # CLI protocol (ESP32 ⇄ computer, over BLE and Wi-Fi)
 
+On this fork, a Windows computer can also pair using `esp32agent pair-usb PORT`. The physical USB
+console returns the board identity, owner credential and current IP. Windows protects this profile with
+DPAPI. Each direct session dials TCP port 7202, uses HELLO/WELCOME and checks the saved board identity.
+The Sense camera authenticates separately on port 7300 using HMAC-SHA256 of the owner key with the label
+`sense-camera-v1`. See the [USB and LAN guide](usb-lan.md).
+
+## Bluetooth pairing
+
 The `esp32agent` CLI talks to the board over BLE next to the iOS app (both can be connected at once). It never uses
 OS-level BLE pairing: a stale bond on either side (macOS `CBError 14`, "Peer removed pairing information") cannot
 break it, and Windows/Linux need no pairing dialog. Instead the link is authenticated and encrypted here, in the
@@ -99,8 +107,9 @@ What the iPhone plays while it mirrors (AirPlay audio), two ways; the CLI's `lis
 - Status `aud`: `hear` (1: the app shares), `raw` (1: records go to this CLI), with the packet and segment counts.
 
 ## Wi-Fi link
-When this computer can reach the board's IP (both on the same Wi-Fi, or the computer joined the board's hotspot),
-the session moves there and BLE stays connected as the way back.
+USB-paired sessions connect directly to the saved address and reconnect there on demand. For a
+Bluetooth-paired session, when this computer can reach the board's IP, the session moves there
+and BLE stays connected as the way back.
 - **TCP port 7202**, one computer at a time. Records `[u16 LE length][frame]` carry the frames above, unchanged.
   A zero-length record is a keepalive: the CLI sends one every 2 s, and the board drops a link quiet for 6 s.
   The board sends status every second, so the CLI drops a link quiet for 5 s.
@@ -111,7 +120,8 @@ the session moves there and BLE stays connected as the way back.
   other link: the old one stops (no replies, status or video), its link stays up. Video starts over from the GOP's
   IDR. Another client's session can't take over. When the TCP link drops, the CLI opens a new session on its BLE
   link; after a failed try it waits 10 s, doubling up to a minute.
-- **`net`** (CLI only): `ok {"mode","ssid","pass","ip"}`, the board's Wi-Fi. `net {"mode":"ap"}` or
+- **`net`** (CLI only) returns the board's Wi-Fi mode, SSID and IP. An explicit `net hotspot-password`
+  request returns the board-generated password when the hotspot is active. `net {"mode":"ap"}` or
   `net {"mode":"sta","ssid":…,"pass":…}` changes it, as the app's `net` write does (the iPhone has to mirror over
   the same network; going from a home network back to the hotspot restarts the board). The CLI's status has `link`: `{"via":"ble"|"wifi","mtu":…,"kbps":…}` for its own link.
 - **LAN lock** (docs/ble-protocol.md, "LAN mode"): on a home network the board may belong to one phone (`own` 1 in

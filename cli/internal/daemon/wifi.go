@@ -6,11 +6,13 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/owner"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/proto"
 )
 
@@ -201,49 +203,123 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// net: the CLI's link and the board's Wi-Fi. arg: "" (show), "via auto|ble", "join SSID PASS", "hotspot".
+const addressHint = "If the address changed, run esp32agent target HOST with the new address or esp32agent pair-usb PORT to read it from the board."
+
+// net reports or changes Wi-Fi settings over the current encrypted command session.
 func (s *Server) net(ctx context.Context, c *Conn, arg string) Response {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	verb, rest, _ := strings.Cut(strings.TrimSpace(arg), " ")
+	verb, rest, _ := strings.Cut(arg, " ")
 	switch verb {
 	case "":
+	case "hotspot-password":
+		if rest != "" {
+			return fail(errors.New("usage: net hotspot-password"))
+		}
+		// Older boards put the AP password in the authenticated net status, and
+		// reject the separate command with a usage error. Preserve explicit retrieval.
+		reply, err := c.Send(ctx, "net hotspot-password")
+		if err != nil && strings.HasPrefix(err.Error(), "usage: net [") {
+			reply, err = c.Send(ctx, "net")
+		}
+		if err != nil {
+			return fail(err)
+		}
+		var ap struct {
+			Mode     string `json:"mode"`
+			SSID     string `json:"ssid"`
+			Password string `json:"pass"`
+		}
+		if json.Unmarshal([]byte(reply), &ap) != nil || ap.Mode != "ap" {
+			return fail(errors.New("the board is not in hotspot mode"))
+		}
+		if ap.Password == "" {
+			return fail(errors.New("board did not return its hotspot password"))
+		}
+		return ok(map[string]string{"ssid": ap.SSID, "password": ap.Password})
+	case "ipv4", "static", "dhcp":
+		cmd := "ipv4"
+		switch verb {
+		case "static":
+			ip, err := netip.ParseAddr(rest)
+			if err != nil || !ip.Is4() || ip.IsLoopback() || ip.As4()[0] == 0 || ip.As4()[0] >= 224 {
+				return fail(errors.New("usage: net static <unicast IPv4 address>"))
+			}
+			cmd += " static " + ip.String()
+		case "dhcp":
+			cmd += " dhcp"
+		}
+		if verb != "static" && rest != "" {
+			return fail(errors.New("usage: net ipv4 | net static IPv4 | net dhcp"))
+		}
+		reply, err := c.Send(ctx, cmd)
+		if err != nil {
+			return fail(err)
+		}
+		var policy struct {
+			Policy  string `json:"policy"`
+			Address string `json:"address"`
+		}
+		if json.Unmarshal([]byte(reply), &policy) != nil || policy.Policy == "" {
+			return fail(errors.New("board did not return an IPv4 policy"))
+		}
+		out := map[string]any{"via": c.Via(), "ipv4": policy}
+		if verb != "ipv4" && c.wifi == nil {
+			out["message"] = addressHint
+		}
+		return ok(out)
 	case "via":
 		if rest != "auto" && rest != "ble" {
 			return fail(errors.New("usage: net via auto|ble"))
 		}
-		c.wifi.setMode(rest)
+		if c.wifi == nil {
+			if rest == "ble" {
+				return fail(errors.New("USB-paired sessions use Wi-Fi; ESP32AGENT_TRANSPORT=ble selects legacy Bluetooth pairing on daemon startup"))
+			}
+		} else {
+			c.wifi.setMode(rest)
+		}
 	case "join", "hotspot":
-		var req map[string]string
+		var settings []byte
 		if verb == "hotspot" {
-			req = map[string]string{"mode": "ap"}
+			if rest != "" {
+				return fail(errors.New("usage: net hotspot"))
+			}
+			settings = []byte(`{"mode":"ap"}`)
 		} else {
 			ssid, pass, _ := strings.Cut(rest, "\x00")
 			if ssid == "" {
 				return fail(errors.New("usage: net join SSID [PASSWORD]"))
 			}
-			req = map[string]string{"mode": "sta", "ssid": ssid, "pass": pass}
+			var err error
+			settings, err = owner.WiFiJoinJSON(ssid, pass)
+			if err != nil {
+				return fail(err)
+			}
 		}
-		b, _ := json.Marshal(req)
-		if _, err := c.Send(ctx, "net "+string(b)); err != nil {
+		if _, err := c.Send(ctx, "net "+string(settings)); err != nil {
 			return fail(err)
+		}
+		// Changing the station or switching to the hotspot can drop this very TCP link.
+		if c.wifi == nil {
+			return ok(map[string]any{"accepted": true, "via": "wifi", "message": addressHint})
 		}
 		c.wifi.setMode(TransportMode()) // try the new network soon
 	default:
-		return fail(errors.New("usage: net [via auto|ble | join SSID [PASSWORD] | hotspot]"))
+		return fail(errors.New("usage: net [via auto|ble | join | hotspot | hotspot-password | ipv4 | static IPv4 | dhcp]"))
 	}
 	reply, err := c.Send(ctx, "net")
 	if err != nil {
 		return fail(err)
 	}
-	var board map[string]any
-	if json.Unmarshal([]byte(reply), &board) != nil {
-		return fail(errors.New("board firmware too old for net: update the board in the app"))
+	board, err := owner.ParseNetwork([]byte(reply))
+	if err != nil {
+		return fail(err)
 	}
-	if board["mode"] == "sta" {
-		delete(board, "pass") // your Wi-Fi's password stays out of logs; the hotspot's is needed to join it
+	mode, lastErr := "wifi", ""
+	if c.wifi != nil {
+		mode, lastErr = c.wifi.state()
 	}
-	mode, lastErr := c.wifi.state()
 	out := map[string]any{"via": c.Via(), "prefer": mode, "board": board}
 	if lastErr != "" && c.Via() != "wifi" {
 		out["wifi_error"] = lastErr

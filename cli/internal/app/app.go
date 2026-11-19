@@ -17,15 +17,21 @@ import (
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/ble"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/owner"
 )
 
 // Version is set at build time (-ldflags "-X .../internal/app.Version=1.2.3").
 var Version = "dev"
 
-const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board, over Bluetooth.
+const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board.
 
-  devices                          boards nearby
-  pair | unpair                    pair this computer (within 3 min of plugging the board in)
+  pair-usb PORT                    save this board's owner credential on Windows for direct Wi-Fi control
+  target HOST                      update the network address of the USB-paired board
+  photo [--output PATH]            take a photo with the board's camera
+  usb PORT wifi status             show the board's Wi-Fi settings over USB
+  usb PORT wifi join SSID [--password-stdin] | hotspot | static IPv4 | dhcp
+  devices                          show the USB-paired board, or discover nearby Bluetooth boards
+  pair | unpair                    manage legacy Bluetooth pairing
   screenshot [--format png|jpeg] [--quality N] [--scale F] [--max-size N] [--output PATH|-]
   io tap X,Y [--aim] [--count N]   coordinates are screenshot pixels; --count 2 double-taps
   io longpress X,Y [--duration MS]
@@ -36,11 +42,13 @@ const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board,
   screencapture --format h264|mjpeg   video to stdout
   device info                      board status
   net                              the CLI's link (BLE or Wi-Fi) and the board's Wi-Fi
-  net via auto|ble                 auto: move to Wi-Fi when this computer reaches the board (default)
-  net join                         the board joins your Wi-Fi: asks for its name and password, sends them over
-                                   Bluetooth, then moves the link to Wi-Fi (the iPhone mirrors over it too)
-  net join SSID [PASSWORD]         the same, non-interactive
+  net via auto|ble                 set the transport preference for a Bluetooth-paired board
+  net join                         enter an SSID and password interactively over the authenticated session
+  net join SSID --password-stdin    read one password line from standard input
   net hotspot                      the board opens its own hotspot again
+  net hotspot-password             show the board's generated hotspot password while in hotspot mode
+  net ipv4                         show the board's station IPv4 policy
+  net static IPv4 | net dhcp       save a static address or use DHCP on the current station network
   calibrate                        measure the pointer (automatic on the first tap)
   listen                           what the iPhone played in the last 30 s, as words (or why it can't be heard)
   listen on|off                    hear the phone's sound while it mirrors (off by default)
@@ -180,12 +188,19 @@ func (a *App) Run(args []string) int {
 		}
 		return a.call(daemon.Request{Cmd: "info", Device: *dev})
 	case "net":
+		passwordStdin := fs.Bool("password-stdin", false, "read the Wi-Fi password from stdin")
 		pos, err := parse(fs, rest)
 		if err != nil {
 			return a.fail(err)
 		}
+		if *passwordStdin {
+			if len(pos) != 2 || pos[0] != "join" || pos[1] == "" {
+				return a.fail(errors.New("usage: net join SSID --password-stdin"))
+			}
+			return a.netJoin(*dev, pos[1])
+		}
 		if len(pos) == 1 && pos[0] == "join" {
-			return a.netJoin(*dev)
+			return a.netJoin(*dev, "")
 		}
 		text := strings.Join(pos, " ")
 		if len(pos) >= 2 && pos[0] == "join" { // SSIDs and passwords may hold spaces
@@ -335,17 +350,23 @@ func (a *App) daemon(idle time.Duration) int {
 	if err != nil {
 		return a.fail(err)
 	}
+	var profile *owner.Profile
+	if daemon.TransportMode() != "ble" && os.Getenv("ESP32AGENT_SIM") == "" {
+		profile, err = owner.Load()
+		if err != nil && !errors.Is(err, owner.ErrNotPaired) {
+			return a.fail(err)
+		}
+	}
 	l, err := daemon.Listen(a.Dir)
 	if err != nil {
 		return a.fail(err)
 	}
 	log.SetFlags(log.LstdFlags)
 	log.Printf("esp32agent %s daemon on %s", Version, daemon.SocketPath(a.Dir))
-	s := &daemon.Server{Transport: ble.Default(), Config: cfg, Dir: a.Dir, Version: Version, Idle: idle}
+	s := &daemon.Server{Transport: ble.Default(), Owner: profile, Config: cfg, Dir: a.Dir, Version: Version, Idle: idle}
 	if err := s.Serve(l); err != nil {
 		log.Print(err)
 		return 1
 	}
-	os.Remove(daemon.SocketPath(a.Dir))
 	return 0
 }

@@ -1,6 +1,8 @@
 // Board settings in NVS and the Wi-Fi link, see netcfg.h.
 #include "netcfg.h"
+#include "static_ip.h"
 #include <WiFi.h>
+#include <cJSON.h>
 #include <Preferences.h>
 #include <esp_mac.h>
 #include <esp_random.h>
@@ -24,11 +26,17 @@
 
 static Preferences prefs;
 static String apSsid, apPass, staSsid, staPass, mode;  // mode: "ap" | "sta"
-static String pending;
+struct WifiRequest {
+  String mode, ssid, pass;
+  uint32_t applyAt = 0;
+};
+constexpr uint32_t WIFI_REPLY_GRACE_MS = 500;
+static WifiRequest pending;
 static SemaphoreHandle_t pendingLock = xSemaphoreCreateMutex();
 // Joining a home network without a restart: AirPlay is advertised again once it is up (airplay_readvertise).
 static uint32_t changedAt = 0;
 static bool readvertise = false;
+static uint32_t ipv4ApplyAt;
 // STA retries back off: a tight reconnect loop starves BLE, which shares the radio.
 static uint32_t retryAt = 0, retryGap = 5000;
 
@@ -47,21 +55,15 @@ static String randomPass() {
   return p;
 }
 
-// Value of a string field in a flat JSON object ("" if absent). Handles \" and \\ escapes.
-static String jsonStr(const String &j, const char *key) {
-  int k = j.indexOf(String("\"") + key + "\"");
-  if (k < 0) return "";
-  int c = j.indexOf(':', k);
-  int q = c < 0 ? -1 : j.indexOf('"', c);
-  if (q < 0) return "";
-  String v;
-  for (int i = q + 1; i < (int)j.length() && j[i] != '"'; i++) v += j[i] == '\\' && i + 1 < (int)j.length() ? j[++i] : j[i];
-  return v;
-}
-
 static String jsonEsc(const String &s) {
   String o;
   for (char ch : s) {
+    if ((uint8_t)ch < 32) {
+      char escaped[7];
+      snprintf(escaped, sizeof escaped, "\\u%04x", (unsigned)(uint8_t)ch);
+      o += escaped;
+      continue;
+    }
     if (ch == '"' || ch == '\\') o += '\\';
     o += ch;
   }
@@ -94,7 +96,8 @@ static void startWifi() {
     // The core rejects open networks by default. Set both ways: once lowered for an open network, a network with
     // a password afterwards would also have been joined by an open look-alike with its name.
     WiFi.setMinSecurity(staPass.isEmpty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK);
-    WiFi.begin(staSsid.c_str(), staPass.c_str());
+    static_ip_prepare(prefs, staSsid);
+    static_ip_connect(staSsid, staPass);
   } else {
     WiFi.mode(WIFI_AP);
     WiFi.softAP(apSsid.c_str(), apPass.c_str(), 6, 0, 4);
@@ -162,26 +165,57 @@ bool net_coex(const String &pref) {
 
 const char *net_coex_mode() { return coexNames[coexPref]; }
 
-void net_request(const String &json) {
+bool net_request(const String &json, bool waitForReply) {
+  cJSON *root = cJSON_ParseWithOpts(json.c_str(), nullptr, true);
+  if (!root) return false;
+  const char *m = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "mode"));
+  const char *ssid = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(root, "ssid"));
+  const cJSON *passField = cJSON_GetObjectItemCaseSensitive(root, "pass");
+  const char *pass = cJSON_GetStringValue(passField);
+  WifiRequest req;
+  if (m && (!strcmp(m, "ap") || !strcmp(m, "off"))) req.mode = m;
+  else if (m && !strcmp(m, "sta") && ssid && *ssid && strlen(ssid) <= 32 &&
+           (!passField || (pass && strlen(pass) <= 64))) {
+    req.mode = m;
+    req.ssid = ssid;
+    req.pass = pass ? pass : "";
+  }
+  cJSON_Delete(root);
+  if (req.mode.isEmpty()) return false;
   xSemaphoreTake(pendingLock, portMAX_DELAY);
-  pending = json;
+  // The control reply is queued on another task. Keep its TCP link up while it leaves.
+  req.applyAt = millis() + (waitForReply ? WIFI_REPLY_GRACE_MS : 0);
+  pending = std::move(req);
   xSemaphoreGive(pendingLock);
+  return true;
 }
 
 static void retrySta() {
   if (mode != "sta") return;
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED || static_ip_waiting_for_probe()) {
     retryGap = 5000;
     return;
   }
   if ((int32_t)(millis() - retryAt) < 0) return;
   WiFi.disconnect();
-  WiFi.begin(staSsid.c_str(), staPass.c_str());
+  static_ip_connect(staSsid, staPass);
   retryGap = min<uint32_t>(retryGap * 2, 60000);
   retryAt = millis() + retryGap;
 }
 
 void net_poll() {
+  if (ipv4ApplyAt && (int32_t)(millis() - ipv4ApplyAt) >= 0) {
+    ipv4ApplyAt = 0;
+    if (mode == "sta") {
+      startWifi();
+      changedAt = millis();
+      readvertise = true;
+    }
+  }
+  if (mode == "sta" && static_ip_poll(prefs)) {
+    changedAt = millis();
+    readvertise = true;
+  }
   retrySta();
   // a station is up once it has an address
   if (readvertise && net_up() && millis() - changedAt > 1500) {
@@ -189,22 +223,20 @@ void net_poll() {
     airplay_readvertise();
   }
   xSemaphoreTake(pendingLock, portMAX_DELAY);
-  String j = pending;
-  pending = "";
+  if (pending.mode.isEmpty() || (int32_t)(millis() - pending.applyAt) < 0) {
+    xSemaphoreGive(pendingLock);
+    return;
+  }
+  WifiRequest req = std::move(pending);
+  pending = {};
   xSemaphoreGive(pendingLock);
-  if (j.isEmpty()) return;
-  String m = jsonStr(j, "mode");
   String wasMode = mode, wasSsid = staSsid;
-  if (m == "ap" || m == "off") {
-    mode = m;
-  } else if (m == "sta" && jsonStr(j, "ssid").length()) {
-    mode = "sta";
-    staSsid = jsonStr(j, "ssid");
-    staPass = jsonStr(j, "pass");
+  mode = req.mode;
+  if (mode == "sta") {
+    staSsid = std::move(req.ssid);
+    staPass = std::move(req.pass);
     prefs.putString("sta_ssid", staSsid);
     prefs.putString("sta_pass", staPass);
-  } else {
-    return;  // malformed write: keep the current link
   }
   prefs.putString("mode", mode);
   // Another network (or none): the owner was this phone's address on the old one.
@@ -232,11 +264,26 @@ bool net_set_owner(uint32_t ip) {
   return true;
 }
 
+String net_ipv4(const String &args) {
+  if (mode != "sta") return args.isEmpty() ? "ok {\"policy\":\"hotspot\",\"address\":\"\"}"
+                                          : "err select a station Wi-Fi network first";
+  bool changed;
+  String reply = static_ip_configure(prefs, staSsid, args, changed);
+  if (changed) ipv4ApplyAt = millis() + WIFI_REPLY_GRACE_MS;
+  return reply;
+}
+
 String net_json(bool vtok) {
   bool sta = mode == "sta";
-  String j = String("{\"mode\":\"") + mode + "\",\"ssid\":\"" + jsonEsc(sta ? staSsid : apSsid) + "\",\"pass\":\"" +
-             jsonEsc(sta ? staPass : apPass) + "\",\"ip\":\"" + net_ip() + "\"";
+  String j = String("{\"mode\":\"") + mode + "\",\"ssid\":\"" + jsonEsc(sta ? staSsid : apSsid) +
+             "\",\"ip\":\"" + net_ip() + "\"";
+  if (vtok) j += ",\"pass\":\"" + jsonEsc(sta ? staPass : apPass) + "\"";
   return j + (vtok ? ",\"vtok\":\"" + wv_token() + "\"}" : "}");
+}
+
+String net_hotspot_password() {
+  if (mode != "ap") return "err hotspot mode required";
+  return String("{\"mode\":\"ap\",\"ssid\":\"") + jsonEsc(apSsid) + "\",\"pass\":\"" + jsonEsc(apPass) + "\"}";
 }
 
 const char *net_mode() {

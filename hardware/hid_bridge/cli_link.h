@@ -4,6 +4,8 @@
 #include <Arduino.h>
 
 void cli_begin();                                         // loads the paired clients from NVS
+void cli_usb_owner_pair(const String &ip);                // emits the credential only to the physical USB console
+bool cli_owner_photo_key(uint8_t key[32]);                // derives the camera key if an owner has been provisioned
 void cli_on_frame(int slot, const uint8_t *p, size_t n);  // a cli_in write (NimBLE host task)
 void cli_reset(int slot);                                 // that peer disconnected
 bool cli_authed(int slot);                                // its first sealed frame verified
@@ -13,7 +15,8 @@ uint32_t cli_gen();                                       // bumps when a sessio
 bool cli_wifi();                                          // that session runs over Wi-Fi (cli_tcp.h)
 uint16_t cli_mtu();                                       // its link's MTU (23 without one)
 void cli_drop();                                          // drops the CLI's links
-void cli_forget_all();                                    // unpair: every client must pair again
+bool cli_forget_owner();                                  // revoke the USB owner before acknowledging unpair
+void cli_forget_all();                                    // forget Bluetooth-paired clients and drop remaining sessions
 // Sealed board → CLI frames. Control (replies, status) only from the BLE TX task; video only from the video task:
 // each stream's counter then grows in send order.
 bool cli_send_ctrl(char kind, const char *text, size_t n, uint32_t timeout_ms);

@@ -6,8 +6,10 @@
 
 void net_begin();
 void net_poll();                         // call from loop(): applies a pending `net` write
-String net_json(bool vtok = true);       // value of the `net` characteristic (the CLI gets it without vtok)
-void net_request(const String &json);    // `net` write; applied by net_poll()
+String net_json(bool vtok = true);       // legacy app characteristic, or credential-free status when false
+String net_hotspot_password();           // explicit request for the board-generated hotspot credential
+bool net_request(const String &json, bool waitForReply = false);  // valid writes are applied by net_poll()
+String net_ipv4(const String &args);     // USB or an authenticated CLI session; no Wi-Fi password in the reply
 const char *net_mode();                  // "ap" | "sta" | "none" (station not connected)
 String net_ip();
 int net_peers();                         // stations on our SoftAP, or 1 when connected as a station

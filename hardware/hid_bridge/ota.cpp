@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "photo_link.h"
 #include <Update.h>
 #include <esp_ota_ops.h>
 #include "lwip/sockets.h"
@@ -59,6 +60,7 @@ static void session(int c) {
     reply(c, line);
     if (!readLine(c, head, sizeof head)) return fail(c, "usage: ota2 <size> <sha256> <hmac>");
   }
+  if (nonce[0] && !strncmp(head, "photo ", 6)) return photo_session(c, nonce, head);
   bool signedImage = !strncmp(head, "ota2 ", 5);
   if (signedImage) {
     if (!nonce[0] || sscanf(head, "ota2 %lu %71s %71s", &size, sha, mac) != 3 || strlen(sha) != 64)

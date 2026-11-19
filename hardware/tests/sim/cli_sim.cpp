@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <map>
 #include <vector>
 #include "Arduino.h"
 #include "Preferences.h"
@@ -35,21 +36,14 @@ int esp_read_mac(uint8_t *mac, int) {
 }
 
 // NVS: one file of key=hex lines.
-static std::string nvs[8][2];
-static int nvsCount;
-static std::string *slotFor(const char *key) {
-  for (int i = 0; i < nvsCount; i++)
-    if (nvs[i][0] == key) return &nvs[i][1];
-  nvs[nvsCount][0] = key;
-  return &nvs[nvsCount++][1];
-}
+static std::map<std::string, std::string> nvs;
 static void nvsSave() {
   const char *path = getenv("CLI_SIM_NVS");
   FILE *f = path ? fopen(path, "w") : NULL;
   if (!f) return;
-  for (int i = 0; i < nvsCount; i++) {
-    fprintf(f, "%s=", nvs[i][0].c_str());
-    for (unsigned char ch : nvs[i][1]) fprintf(f, "%02x", ch);
+  for (const auto &entry : nvs) {
+    fprintf(f, "%s=", entry.first.c_str());
+    for (unsigned char ch : entry.second) fprintf(f, "%02x", ch);
     fprintf(f, "\n");
   }
   fclose(f);
@@ -68,20 +62,34 @@ static void nvsLoad() {
       sscanf(h, "%2x", &x);
       v.push_back((char)x);
     }
-    *slotFor(line) = v;
+    nvs[line] = v;
   }
   if (f) fclose(f);
 }
-bool Preferences::begin(const char *, bool) { return true; }
-size_t Preferences::putBytes(const char *k, const void *p, size_t n) { *slotFor(k) = std::string((const char *)p, n); nvsSave(); return n; }
+bool Preferences::begin(const char *ns, bool) {
+  // Previous simulations persisted the default "cli" namespace without a prefix.
+  prefix = strcmp(ns, "cli") == 0 ? "" : std::string(ns) + "/";
+  return true;
+}
+bool Preferences::isKey(const char *k) { return nvs.count(prefix + k) != 0; }
+size_t Preferences::getBytesLength(const char *k) { return isKey(k) ? nvs.at(prefix + k).size() : 0; }
+bool Preferences::clear() {
+  for (auto it = nvs.begin(); it != nvs.end();) {
+    bool match = prefix.empty() ? it->first.find('/') == std::string::npos : it->first.rfind(prefix, 0) == 0;
+    if (match) it = nvs.erase(it);
+    else ++it;
+  }
+  nvsSave();
+  return true;
+}
+size_t Preferences::putBytes(const char *k, const void *p, size_t n) { nvs[prefix + k] = std::string((const char *)p, n); nvsSave(); return n; }
 size_t Preferences::getBytes(const char *k, void *p, size_t n) {
-  std::string *v = slotFor(k);
-  if (v->size() != n) return 0;
-  memcpy(p, v->data(), n);
+  if (!isKey(k) || getBytesLength(k) != n) return 0;
+  memcpy(p, nvs.at(prefix + k).data(), n);
   return n;
 }
-size_t Preferences::putUChar(const char *k, uint8_t v) { *slotFor(k) = std::string(1, (char)v); nvsSave(); return 1; }
-uint8_t Preferences::getUChar(const char *k, uint8_t def) { std::string *v = slotFor(k); return v->size() == 1 ? (uint8_t)(*v)[0] : def; }
+size_t Preferences::putUChar(const char *k, uint8_t v) { return putBytes(k, &v, 1); }
+uint8_t Preferences::getUChar(const char *k, uint8_t def) { uint8_t v; return getBytes(k, &v, 1) ? v : def; }
 
 // The radio side cli_link.cpp talks to.
 static bool linked = true;
