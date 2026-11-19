@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-15, goos: darwin, goarch: arm64, cgo: "1" }
+          - { runner: macos-15-intel, goos: darwin, goarch: arm64, cgo: "1" }
           - { runner: windows-2025, goos: windows, goarch: amd64, cgo: "0" }
           # The firmware simulator requires the mbedTLS 3.x headers shipped in 26.04.
           - { runner: ubuntu-26.04, goos: linux, goarch: amd64, cgo: "0" }
@@ -53,13 +53,20 @@ jobs:
       - name: Test the native CLI
         run: |
           if [[ "$RUNNER_OS" == Windows ]]; then go test ./...; else go test -race ./...; fi
-      - name: Build, run and package the native executable
+      - name: Build, verify and package the executable
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ matrix.cgo }}
         run: |
-          test "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" = "$GOOS/$GOARCH"
+          host="$(go env GOHOSTOS)/$(go env GOHOSTARCH)"
+          if [[ "$GOOS" == darwin ]]; then
+            export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+            export MACOSX_DEPLOYMENT_TARGET=15.0
+            export CC="clang -arch $GOARCH" CXX="clang++ -arch $GOARCH"
+          else
+            test "$host" = "$GOOS/$GOARCH"
+          fi
           version="0.0.0-dev.${GITHUB_SHA:0:12}"
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             version=${GITHUB_REF_NAME#cli-v}
@@ -68,8 +75,17 @@ jobs:
           exe=esp32agent
           if [[ "$GOOS" == windows ]]; then exe=esp32agent.exe; fi
           mkdir -p dist/pkg
-          go build -trimpath -ldflags "-s -w -X github.com/onehumanbeing/esp32-iphone-agent/cli/internal/app.Version=$version" -o "dist/pkg/$exe" ./cmd/esp32agent
-          "dist/pkg/$exe" version | python -c 'import json,sys; assert json.load(sys.stdin)["data"]["version"] == sys.argv[1]' "$version"
+          binary="dist/pkg/$exe"
+          go build -trimpath -ldflags "-s -w -X github.com/onehumanbeing/esp32-iphone-agent/cli/internal/app.Version=$version" -o "$binary" ./cmd/esp32agent
+          if [[ "$GOOS" == darwin ]]; then
+            test "$(lipo -archs "$binary")" = "$GOARCH"
+            otool -L "$binary" | grep -F 'CoreBluetooth.framework/'
+            if ! codesign --verify "$binary"; then codesign --force --sign - "$binary"; fi
+            codesign --verify --strict --verbose=2 "$binary"
+          fi
+          if [[ "$host" == "$GOOS/$GOARCH" ]]; then
+            "$binary" version | python -c 'import json,sys; assert json.load(sys.stdin)["data"]["version"] == sys.argv[1]' "$version"
+          fi
           archive="esp32agent_${GOOS}_${GOARCH}"
           if [[ "$GOOS" == windows ]]; then
             (cd dist/pkg && python -m zipfile -c "../$archive.zip" "$exe")
