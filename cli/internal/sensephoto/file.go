@@ -41,7 +41,7 @@ func Capture(host string, key []byte, output string) (Result, error) {
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		addr = net.JoinHostPort(addr, "7300")
 	}
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	conn, err := dialPhoto(addr)
 	if err != nil {
 		return Result{}, err
 	}
