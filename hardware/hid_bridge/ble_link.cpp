@@ -510,7 +510,9 @@ void ble_reply(const String &line, char dest) {
 void ble_cli_status(const String &full, const String &compact) {
   int slot = cli_slot();
   if (slot < 0) return;
-  const String &s = full.length() + 1 + CLI_OVERHEAD + 3 <= cli_mtu() ? full : compact;
+  // TCP has a larger MTU than the shared text queue. Queue a complete JSON document.
+  const bool fullFits = full.length() <= TEXT_MAX && full.length() + 1 + CLI_OVERHEAD + 3 <= cli_mtu();
+  const String &s = fullFits ? full : compact;
   xSemaphoreTake(statusLock, portMAX_DELAY);
   toText(cliStatus, s);
   if (!cliStatusDirty) ctrlPending++;

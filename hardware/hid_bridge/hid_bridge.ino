@@ -473,10 +473,11 @@ String statusJson(bool full, char who) {
 void statusTask(void *) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(1000));
-    if (!ble_connected()) continue;
-    String s = statusJson(true, FROM_APP);
-    if (s.length() > ble_mtu() - 3u) s = statusJson(false, FROM_APP);
-    ble_status(s);
+    if (ble_connected()) {
+      String s = statusJson(true, FROM_APP);
+      if (s.length() > ble_mtu() - 3u) s = statusJson(false, FROM_APP);
+      ble_status(s);
+    }
     if (cli_slot() >= 0) ble_cli_status(statusJson(true, FROM_CLI), statusJson(false, FROM_CLI));
   }
 }
