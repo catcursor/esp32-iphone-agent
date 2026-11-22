@@ -7,6 +7,7 @@ import (
 	"debug/macho"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/draw"
@@ -23,6 +24,20 @@ import (
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
 )
+
+func TestLibcDeploymentFloor(t *testing.T) {
+	for _, v := range []string{"glibc 2.31", "glibc 2.36", "glibc 2.37"} {
+		err := checkLibcVersion(v)
+		if !errors.Is(err, ErrIncompatibleLibc) || !errors.Is(err, ErrUnavailable) {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+	for _, v := range []string{"glibc 2.38", "glibc 2.41", "glibc 3.1", "unspecified"} {
+		if err := checkLibcVersion(v); err != nil {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+}
 
 func TestStageArchiveChecksum(t *testing.T) {
 	dir := t.TempDir()

@@ -29,23 +29,31 @@ var ErrIncompatibleLibc = fmt.Errorf("%w: Linux x64 RapidOCR needs glibc 2.38 or
 // Check before a 190 MB installation or an attempted launch on older Debian.
 // If getconf is unavailable, installation still probes the actual executable.
 var checkHost = sync.OnceValue(func() error {
-	if runtime.GOOS != "linux" {return nil}
-	ctx,cancel:=context.WithTimeout(context.Background(),2*time.Second)
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	out,err:=exec.CommandContext(ctx,"getconf","GNU_LIBC_VERSION").Output()
-	if err!=nil{return nil}
+	out, err := exec.CommandContext(ctx, "getconf", "GNU_LIBC_VERSION").Output()
+	if err != nil {
+		return nil
+	}
 	return checkLibcVersion(strings.TrimSpace(string(out)))
 })
 
 func checkLibcVersion(version string) error {
-	fields:=strings.Fields(version)
-	if len(fields)!=2 || fields[0]!="glibc"{return nil}
-	parts:=strings.Split(fields[1],".")
-	if len(parts)<2{return nil}
-	major,em:=strconv.Atoi(parts[0])
-	minor,en:=strconv.Atoi(parts[1])
-	if em==nil && en==nil && (major<2 || major==2 && minor<38){
-		return fmt.Errorf("%w (found %s); install Tesseract and the OCR languages needed on the host",ErrIncompatibleLibc,version)
+	fields := strings.Fields(version)
+	if len(fields) != 2 || fields[0] != "glibc" {
+		return nil
+	}
+	parts := strings.Split(fields[1], ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	major, em := strconv.Atoi(parts[0])
+	minor, en := strconv.Atoi(parts[1])
+	if em == nil && en == nil && (major < 2 || major == 2 && minor < 38) {
+		return fmt.Errorf("%w (found %s); install Tesseract and the OCR languages needed on the host", ErrIncompatibleLibc, version)
 	}
 	return nil
 }
@@ -89,7 +97,9 @@ func release() (asset, string, error) {
 	if !ok {
 		return a, "", fmt.Errorf("%w: no release for %s", ErrUnavailable, platform)
 	}
-	if err:=checkHost();err!=nil{return a,"",err}
+	if err := checkHost(); err != nil {
+		return a, "", err
+	}
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return a, "", err

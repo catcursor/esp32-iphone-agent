@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 )
 
 // Install stages and verifies a complete upstream distribution before publishing
@@ -22,7 +24,7 @@ func Install(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if exe, _, err := paths(dir); err == nil {
-		return exe, nil
+		return exe, probeLauncher(ctx, exe)
 	}
 	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0700); err != nil {
@@ -49,8 +51,12 @@ func Install(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("extracting RapidOCR: %w: %s", err, output)
 	}
 	extracted := filepath.Join(temp, filepath.Base(dir))
-	if _, _, err := paths(extracted); err != nil {
+	exe, _, err := paths(extracted)
+	if err != nil {
 		return "", fmt.Errorf("incomplete RapidOCR release: %w", err)
+	}
+	if err := probeLauncher(ctx, exe); err != nil {
+		return "", err
 	}
 	if err := os.Rename(extracted, dir); err != nil {
 		// Another installer may have finished while the archive was downloading.
@@ -70,8 +76,20 @@ func Install(ctx context.Context) (string, error) {
 			return "", publishErr
 		}
 	}
-	exe, _, err := paths(dir)
+	exe, _, err = paths(dir)
 	return exe, err
+}
+
+// Check that the host dynamic loader can start the bundled Python runtime.
+// This path exits during argument parsing, before opening a port or loading a model.
+func probeLauncher(ctx context.Context, exe string) error {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, exe, "serve", "--help").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("RapidOCR could not start on this host: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func stageArchive(ctx context.Context, a asset, dest string) error {

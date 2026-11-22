@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"time"
 
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
@@ -21,10 +22,14 @@ func (a *App) ocr(args []string) int {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 		exe, err := portableocr.Install(ctx)
+		if errors.Is(err, portableocr.ErrIncompatibleLibc) {
+			_, lookupErr := exec.LookPath("tesseract")
+			return a.print(daemon.Response{Status: "ok", Data: map[string]any{"installed": false, "reason": err.Error(), "fallback": "tesseract", "tesseract_on_path": lookupErr == nil}})
+		}
 		if err != nil {
 			return a.fail(err)
 		}
-		return a.print(daemon.Response{Status: "ok", Data: map[string]string{"executable": exe}})
+		return a.print(daemon.Response{Status: "ok", Data: map[string]any{"installed": true, "executable": exe}})
 	case "recognize":
 		input := a.In
 		if input == nil {
