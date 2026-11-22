@@ -37,7 +37,10 @@ type Request struct {
 	Scale   float64   `json:"scale,omitempty"`
 	MaxSize int       `json:"max_size,omitempty"`
 	Aim     bool      `json:"aim,omitempty"`
-	Count   int       `json:"count,omitempty"` // taps in a row at one point (2: double tap)
+	Count   int       `json:"count,omitempty"`  // taps in a row at one point (2: double tap)
+	Step    []float64 `json:"step,omitempty"`   // graph units per grid cell, x then y
+	Locate  bool      `json:"locate,omitempty"` // resolve a labeled or graph target without tapping
+	Verify  bool      `json:"verify,omitempty"` // independently verify the saved pointer calibration
 }
 
 // Response is the CLI's JSON output, as mobilecli's: {"status":"ok","data":…} or {"status":"error","error":"…"}.
@@ -205,10 +208,30 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 	case "screenshot":
 		return s.screenshot(ctx, c, req)
 	case "calibrate":
-		return s.calibrate(ctx, c)
-	case "tap", "longpress", "swipe", "text", "keys", "button":
+		c.inputMu.Lock()
+		defer c.inputMu.Unlock()
+		ctx = context.WithValue(ctx, inputSessionKey{}, c.Links())
+		mode := newCalibration
+		if req.Verify {
+			mode = verifyCalibration
+		}
+		return s.calibrate(ctx, c, mode)
+	case "tap", "longpress", "swipe", "text", "keys", "button", "tap-text", "tap-grid":
+		c.inputMu.Lock()
+		defer c.inputMu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if req.Cmd != "keys" && req.Cmd != "text" {
+			ctx = context.WithValue(ctx, inputSessionKey{}, c.Links())
+		}
+		if req.Cmd == "tap-text" || req.Cmd == "tap-grid" {
+			return s.locatedTap(ctx, c, req)
+		}
 		return s.io(ctx, c, req)
 	case "send": // debugging: one raw board command; afterwards the pointer position is unknown
+		c.inputMu.Lock()
+		defer c.inputMu.Unlock()
 		reply, err := c.Send(ctx, req.Text)
 		c.pointer(s.Dir).Forget()
 		if err != nil {

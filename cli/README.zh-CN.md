@@ -2,7 +2,7 @@
 
 [English](README.md) · 简体中文
 
-命令行工具和 MCP 服务器，让电脑（以及电脑上的编程 Agent：Claude Code、Codex）通过 ESP32 Agent 板子看到并操作 iPhone。板子插在 iPhone 上，充当它的 USB 鼠标和键盘，并接收它的 AirPlay 屏幕镜像；电脑通过蓝牙连接板子，两者在同一个网络时改走 Wi-Fi，可以和 iOS App 并用。命令和 JSON 输出格式沿用 [mobilecli](https://github.com/mobile-next/mobilecli)。
+本分支的命令行让电脑通过局域网操作真实 iPhone。板子通过系统「屏幕镜像」收画面，通过 USB 向手机发送键鼠输入。大模型在电脑上用 [iphone-lan 技能](../skills/iphone-lan/SKILL.md) 直接调用命令，手机无需安装 App。
 
 ## 安装
 
@@ -19,13 +19,13 @@ Windows（PowerShell）：`irm https://raw.githubusercontent.com/catcursor/esp32
 配对后把板子接到 iPhone，再在电脑上运行 `esp32agent device info` 验证局域网连接。
 板子的地址改变后，用 `esp32agent target HOST` 更新电脑保存的地址。
 
-## 通过蓝牙配对
+## 屏幕、文字框与坐标
 
-1. 把板子插到 iPhone 上，三分钟内运行 `esp32agent pair`。
-2. 在 iPhone 上：控制中心 > 屏幕镜像 > ESP32 Agent。
-3. 这时 `esp32agent screenshot` 应该会保存一张手机屏幕的 PNG。
+开启 iPhone 的「辅助触控」，将「屏幕镜像」投到 ESP32 Agent。运行 `esp32agent screenshot --output screen.png`。它返回文件路径、输出尺寸以及同一帧的本地 OCR。部署时运行 `esp32agent ocr install` 获取固定版本的 [RapidOCR 运行时和模型](https://github.com/AwesomeDog/RapidOCR-CLI/releases/tag/v0.1.0)。日常识别在本机完成。
 
-配对由 CLI 自己完成（X25519 密钥交换，之后是 AES-GCM 会话；见 `docs/cli-protocol.md`），不经过操作系统，所以系统里残留的蓝牙配对记录不会有影响。密钥保存在用户配置目录（`~/Library/Application Support/esp32agent`、`~/.config/esp32agent`、`%AppData%\esp32agent`），权限 0600。
+`data.ocr.items[]` 的 `text` 是识别文字，`box` 和 `center` 是输出图片上的像素，`tap` 是可直接传给 `io tap X,Y` 的完整镜像坐标。大模型自行选择是否使用文字框，可用周围内容分辨同名文字，或直接看图定位图标。默认按原尺寸截图。缩放时，`width,height` 是输出尺寸，`source_width,source_height` 是完整镜像尺寸。`--output -` 将图片写到标准输出，OCR 元数据写到标准错误。
+
+每个会话首次执行位置手势前，CLI 会在镜像上核对两个光标位置。可运行 `esp32agent calibrate --verify` 读取已有映射的逐点误差，运行 `esp32agent calibrate` 重新测量。校验需要镜像实时更新且光标可见。蓝牙兼容流程见[原项目协议](../docs/cli-protocol.md)。
 
 ## 命令
 
@@ -35,6 +35,8 @@ Windows（PowerShell）：`irm https://raw.githubusercontent.com/catcursor/esp32
 | `pair`、`unpair` | 配对这台电脑；在这台电脑上忘掉板子 |
 | `screenshot [--format png\|jpeg] [--quality N] [--scale F] [--max-size N] [--output PATH\|DIR/\|-]` | 上一个操作结束、画面稳定后的屏幕；默认保存到当前目录 |
 | `io tap X,Y [--aim] [--count N]` | 坐标是原尺寸截图的像素；`--count 2` 双击 |
+| `io tap-text "文字" [--locate] [--aim]` | 用本地 OCR 找到屏幕上唯一匹配的文字并点其中心。 |
+| `io tap-grid X,Y --step N [--locate] [--aim]` | 在浅色等距直角坐标网上按数学坐标点按。两条深色零轴须可见，X 向右、Y 向上。从刻度读出每格的单位数，两轴不同时用 `--step NX,NY`。 |
 | `io longpress X,Y [--duration MS]` | |
 | `io swipe X1,Y1,X2,Y2` | |
 | `io text 'TEXT'` | 仅 ASCII；中文按拼音输入 |
@@ -42,7 +44,7 @@ Windows（PowerShell）：`irm https://raw.githubusercontent.com/catcursor/esp32
 | `io button HOME` | 唯一的按键 |
 | `screencapture --format h264\|mjpeg` | 实时视频输出到 stdout，例如 `\| ffplay -` |
 | `device info` | 板子状态：`ap`（镜像中）、`fz`（画面冻结）、`busy`（App 正在使用手机）、`usb`、`ble` |
-| `calibrate` | 测量指针（第一次点按时会自动执行；需要指针可见） |
+| `calibrate [--verify]` | 测量并验证光标映射，或仅检查已有映射 |
 | `net` | CLI 当前的通道（`via`：`ble` 或 `wifi`）和板子的 Wi-Fi。电脑和板子在同一个网络（同一个 Wi-Fi，或电脑连着板子热点）时，命令和画面走 Wi-Fi，蓝牙作为备用通道 |
 | `net join` | 询问 Wi-Fi 名称和密码（密码不回显），通过蓝牙会话发给板子，并等到通道切到 Wi-Fi。`net join SSID [PASSWORD]` 不询问直接设置。iPhone 也通过这个 Wi-Fi 镜像 |
 | `net hotspot` | 让板子重新打开自己的热点 |
@@ -69,17 +71,11 @@ Windows（PowerShell）：`irm https://raw.githubusercontent.com/catcursor/esp32
 
 附近有多块板子时，用 `--device <id>`（12 位十六进制 ID，或板子名称里的 4 位十六进制数）指定，或设置 `ESP32AGENT_DEVICE`。输出是 `{"status":"ok","data":...}` 或 `{"status":"error","error":"..."}`（退出码 1）。需要设备端 Agent 的 mobilecli 命令（`apps`、`dump ui`、`fs`、`webview` 等）会返回 `not supported on ESP32 Agent`。
 
-第一个命令会启动后台的 `esp32agent daemon`，由它保持蓝牙会话并解码视频；其他命令通过配置目录里的 unix socket 连接它（日志：同目录下的 `daemon.log`）。空闲 10 分钟后它会自动退出。
+第一个命令会启动后台的 `esp32agent daemon`，由它保持板子会话并解码视频；其他命令通过配置目录里的 unix socket 连接它（日志：同目录下的 `daemon.log`）。空闲 10 分钟后它会自动退出。
 
 ## 接入 Agent
 
-```sh
-claude mcp add esp32agent -- esp32agent mcp      # Claude Code
-codex mcp add esp32agent -- esp32agent mcp       # Codex
-esp32agent skill install                         # Claude Code 技能（操作循环、输入规则）
-```
-
-MCP 工具：`screenshot`（返回图片）、`tap`、`longpress`、`swipe`、`type_text`、`press_key`、`press_button`、`device_info`，以及 `history`、`intent_list`、`intent_show`、`intent_save`、`memory_recall`、`memory_add`。操作循环是：截图、判断、做一步、再截图，见 [SKILL.md](SKILL.md)。
+将仓库的 `skills/iphone-lan` 复制到 Codex 技能目录。默认是 `~/.codex/skills/iphone-lan`。Claude Code 可运行 `esp32agent skill install` 安装内置英文技能。两者都直接调用 CLI。使用其他集成时也可运行 `esp32agent mcp`。
 
 ## 历史记录和意图
 

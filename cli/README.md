@@ -2,10 +2,7 @@
 
 English · [简体中文](README.zh-CN.md)
 
-Command line and MCP server that let a computer (and the coding agent on it: Claude Code, Codex) see and drive an
-iPhone through an ESP32 Agent board. The board is plugged into the iPhone as its USB mouse and keyboard and receives
-its AirPlay screen mirroring; the computer reaches it over Bluetooth, or over Wi-Fi when both are on the same network, next to the iOS app. Commands and JSON output
-follow [mobilecli](https://github.com/mobile-next/mobilecli).
+This fork’s CLI controls a real iPhone from a computer over the LAN. The board receives the iPhone’s Screen Mirroring stream and sends USB mouse and keyboard input. The computer’s agent calls the CLI directly using the [iphone-lan skill](../skills/iphone-lan/SKILL.md). The phone needs no companion app.
 
 ## Install
 
@@ -22,15 +19,13 @@ Connect the board to your computer and run `esp32agent pair-usb PORT` with its s
 After pairing, move the board to the iPhone and run `esp32agent device info` over the LAN.
 `esp32agent target HOST` updates the board address saved on the computer.
 
-## Pair over Bluetooth
+## Screen, text boxes and coordinates
 
-1. Plug the board into the iPhone. Within 3 minutes: `esp32agent pair`.
-2. On the iPhone: Control Center > Screen Mirroring > ESP32 Agent.
-3. `esp32agent screenshot` should now write a PNG of the phone's screen.
+Enable AssistiveTouch and mirror the iPhone screen to ESP32 Agent. Run `esp32agent screenshot --output screen.png`. It returns the file path, dimensions and local OCR from that frame. Run `esp32agent ocr install` at deployment to fetch the pinned [RapidOCR runtime and models](https://github.com/AwesomeDog/RapidOCR-CLI/releases/tag/v0.1.0). Recognition runs on the computer.
 
-Pairing is done by the CLI itself (X25519 key exchange, then AES-GCM sessions; see `docs/cli-protocol.md`),
-never by the OS, so stale Bluetooth bonds don't matter. Keys live in the user config dir
-(`~/Library/Application Support/esp32agent`, `~/.config/esp32agent`, `%AppData%\esp32agent`), mode 0600.
+Each item in `data.ocr.items[]` has its recognized `text`, a `box` and `center` in output-image pixels and a `tap` point ready for `io tap X,Y` in full-screen pixels. The agent can distinguish repeated labels by context or use the image directly for icons. The default image is full size. On resized output, `width,height` describe the saved image and `source_width,source_height` the original frame. With `--output -`, stdout contains the image and stderr carries the OCR metadata.
+
+Before the first positional gesture of a session the CLI checks the pointer against two locations on the mirrored screen. Run `esp32agent calibrate --verify` for per-point error on the saved mapping. Run `esp32agent calibrate` to remeasure. Both require a live mirrored screen and a visible pointer. The [upstream protocol](../docs/cli-protocol.md) documents Bluetooth compatibility.
 
 ## Commands
 
@@ -40,6 +35,8 @@ never by the OS, so stale Bluetooth bonds don't matter. Keys live in the user co
 | `pair`, `unpair` | pair this computer; forget the board here |
 | `screenshot [--format png\|jpeg] [--quality N] [--scale F] [--max-size N] [--output PATH\|DIR/\|-]` | the screen after the last action settled; default a file in the current directory |
 | `io tap X,Y [--aim] [--count N]` | coordinates are pixels of a full-size screenshot; `--count 2` double-taps |
+| `io tap-text "LABEL" [--locate] [--aim]` | find a unique matching label on the live screen with local OCR and tap its center.  |
+| `io tap-grid X,Y --step N [--locate] [--aim]` | tap a point in graph units on an axis-aligned, evenly spaced light grid with visible darker zero axes (right/up). Read the step from the tick labels. Use `--step NX,NY` for different horizontal and vertical units per cell. |
 | `io longpress X,Y [--duration MS]` | |
 | `io swipe X1,Y1,X2,Y2` | |
 | `io text 'TEXT'` | ASCII; Chinese is typed as pinyin |
@@ -47,7 +44,7 @@ never by the OS, so stale Bluetooth bonds don't matter. Keys live in the user co
 | `io button HOME` | the only button |
 | `screencapture --format h264\|mjpeg` | live video to stdout, e.g. `\| ffplay -` |
 | `device info` | board status: `ap` (mirroring), `fz` (video frozen), `busy` (the app holds the phone), `usb`, `ble` |
-| `calibrate` | measure the pointer (runs by itself on the first tap; needs the pointer visible) |
+| `calibrate [--verify]` | measure and verify the pointer, or check its saved mapping |
 | `net` | the CLI's link (`via`: `ble` or `wifi`) and the board's Wi-Fi. With this computer on the board's network (same Wi-Fi, or its hotspot) commands and video go over Wi-Fi; BLE stays as the way back |
 | `net join` | asks for your Wi-Fi's name and password (not echoed), sends them to the board over the Bluetooth session, and waits until the link moves to Wi-Fi. `net join SSID [PASSWORD]` does it without asking. The iPhone mirrors over that Wi-Fi too |
 | `net hotspot` | the board opens its own hotspot again |
@@ -77,20 +74,12 @@ With several boards around pass `--device <id>` (the 12-hex id or the 4 hex digi
 mobilecli commands that need an on-device agent (`apps`, `dump ui`, `fs`, `webview`, ...) answer
 `not supported on ESP32 Agent`.
 
-The first command starts a background `esp32agent daemon` that holds the Bluetooth session and decodes the video;
+The first command starts a background `esp32agent daemon` that holds the board connection and decodes video;
 commands reach it over a unix socket in the config dir (log: `daemon.log` there). It exits after 10 minutes idle.
 
 ## Agents
 
-```sh
-claude mcp add esp32agent -- esp32agent mcp      # Claude Code
-codex mcp add esp32agent -- esp32agent mcp       # Codex
-esp32agent skill install                         # Claude Code skill (the loop, typing rules)
-```
-
-MCP tools: `screenshot` (returns the image), `tap`, `longpress`, `swipe`, `type_text`, `press_key`, `press_button`,
-`device_info`, and `history`, `intent_list`, `intent_show`, `intent_save`, `memory_recall`, `memory_add`. The loop is screenshot, decide, one action,
-screenshot: see [SKILL.md](SKILL.md).
+Copy `skills/iphone-lan` into the Codex skills directory, normally `~/.codex/skills/iphone-lan`. For Claude Code, run `esp32agent skill install` to write the embedded English skill. Both skills use the CLI directly. The `esp32agent mcp` entry point is also available for other integrations.
 
 ## History and intents
 

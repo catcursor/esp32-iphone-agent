@@ -53,6 +53,17 @@ jobs:
       - name: Test the native CLI
         run: |
           if [[ "$RUNNER_OS" == Windows ]]; then go test ./...; else go test -race ./...; fi
+      - name: Verify the pinned portable OCR release
+        env:
+          OCR_PLATFORM: ${{ matrix.goos }}/${{ matrix.goarch }}
+        run: |
+          if [[ "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" == "$OCR_PLATFORM" ]]; then
+            go run ./cmd/esp32agent ocr install
+            ESP32AGENT_TEST_RAPIDOCR=1 go test -count=1 -run TestInstalledEngine ./internal/portableocr
+          else
+            # This Intel runner cross-compiles the Apple Silicon executable.
+            ESP32AGENT_TEST_APPLE_OCR=1 go test -count=1 -run TestAppleSiliconRelease ./internal/portableocr
+          fi
       - name: Build, verify and package the executable
         env:
           GOOS: ${{ matrix.goos }}

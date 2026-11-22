@@ -17,6 +17,7 @@ import (
 
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/pointer"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/textloc"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/video"
 	"golang.org/x/image/draw"
 )
@@ -129,7 +130,7 @@ func encode(img image.Image, format string, quality int, scale float64, maxSize 
 }
 
 func (s *Server) screenshot(ctx context.Context, c *Conn, req Request) Response {
-	img, err := s.frame(ctx, c)
+	img, err := s.currentFrame(ctx, c)
 	if err != nil {
 		return fail(err)
 	}
@@ -142,8 +143,11 @@ func (s *Server) screenshot(ctx context.Context, c *Conn, req Request) Response 
 		format = "jpeg"
 	}
 	s.recordShot(img, r.Dx(), r.Dy())
-	return ok(map[string]any{"format": format, "data": base64.StdEncoding.EncodeToString(data),
-		"width": r.Dx(), "height": r.Dy(), "device": c.ID})
+	size := img.Bounds().Size()
+	source := image.Rectangle{Max: size}
+	return ok(Screenshot{Format: format, Data: base64.StdEncoding.EncodeToString(data), Device: c.ID,
+		Width: r.Dx(), Height: r.Dy(), SourceWidth: size.X, SourceHeight: size.Y,
+		SourceRect: textloc.Box{Width: size.X, Height: size.Y}, OCR: textloc.Scan(ctx, data, r.Size(), source)})
 }
 
 func (c *Conn) pointer(dir string) *pointer.Pointer {
@@ -167,25 +171,79 @@ func (c *Conn) size() (float64, float64, error) {
 	return 0, 0, errors.New("screen size unknown (no video yet): take a screenshot first")
 }
 
-func (s *Server) calibrate(ctx context.Context, c *Conn) Response {
-	if err := s.videoState(ctx, c); err != nil {
-		return fail(err)
-	}
-	if _, err := s.frame(ctx, c); err != nil {
-		return fail(err)
-	}
-	p := c.pointer(s.Dir)
-	if err := p.Calibrate(ctx); err != nil {
-		return fail(err)
-	}
-	out := map[string]any{"span": map[string]int{"w": p.Span.W, "h": p.Span.H}}
-	if e, found, err := p.Verify(ctx, 0.5, 0.62); err == nil && found {
-		out["error"] = e // miss at a check point, fraction of the screen
+type calibrationMode int
+
+const (
+	firstPosition calibrationMode = iota
+	verifyCalibration
+	newCalibration
+)
+
+func (c *Conn) pointerChecked() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sess != nil && c.checkedLink == c.links && c.frame != nil && c.checkedSize == c.frame.Bounds().Size()
+}
+
+// Input commands hold inputMu. Never reuse a successful check for another link
+// or display size, even when that new session loaded the same calibration file.
+func (s *Server) preparePointer(ctx context.Context, c *Conn, mode calibrationMode) (*pointer.Verification, error) {
+	if mode == firstPosition && c.pointerChecked() {
+		return nil, nil
 	}
 	c.mu.Lock()
-	c.lastAction = time.Now()
+	c.checkedSize = image.Point{}
 	c.mu.Unlock()
-	return ok(out)
+	if _, err := s.currentFrame(ctx, c); err != nil {
+		return nil, err
+	}
+	link := c.Links()
+	p := c.pointer(s.Dir)
+	var report pointer.Verification
+	var err error
+	defer func() {
+		c.mu.Lock()
+		c.lastAction = time.Now()
+		c.mu.Unlock()
+	}()
+	if mode == newCalibration || mode == firstPosition && !p.Calibrated() {
+		report, err = p.Recalibrate(ctx)
+	} else {
+		report, err = p.CheckAccuracy(ctx)
+		if mode == firstPosition && errors.Is(err, pointer.ErrVerification) && ctx.Err() == nil {
+			// Only a measured miss or an invisible pointer warrants one new fit.
+			var recalibrationErr error
+			if report, recalibrationErr = p.Recalibrate(ctx); recalibrationErr != nil {
+				err = fmt.Errorf("%v; one recalibration attempt failed: %w", err, recalibrationErr)
+			} else {
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		return &report, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	size := image.Pt(report.Width, report.Height)
+	if c.sess == nil || c.links != link || c.frame == nil || c.frame.Bounds().Size() != size || c.status["ap"] != "streaming" || num(c.status["fz"]) == 1 || c.status["owner"] == "app" {
+		report.Verified = false
+		return &report, errors.New("screen or session changed during pointer verification; retry on the current screen")
+	}
+	c.checkedLink, c.checkedSize = link, size
+	return &report, nil
+}
+
+func (s *Server) calibrate(ctx context.Context, c *Conn, mode calibrationMode) Response {
+	report, err := s.preparePointer(ctx, c, mode)
+	if err != nil {
+		r := fail(err)
+		if report != nil && report.Width > 0 {
+			r.Data = report
+		}
+		return r
+	}
+	return ok(report)
 }
 
 // textChunk keeps one `type` line well inside a single BLE write.
@@ -215,20 +273,26 @@ func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 			if !strings.EqualFold(req.Text, "HOME") {
 				return fmt.Errorf("button %s not supported on ESP32 Agent (only HOME)", req.Text)
 			}
-			return p.GoHome(ctx)
+			return p.GoHome(ctx, func() error {
+				_, err := s.preparePointer(ctx, c, firstPosition)
+				return err
+			})
+		}
+		expected, located := ctx.Value(inputSizeKey{}).(image.Point)
+		if !located {
+			if _, err := s.preparePointer(ctx, c, firstPosition); err != nil {
+				return err
+			}
 		}
 		w, h, err := c.size()
 		if err != nil {
 			return err
 		}
-		if !p.Calibrated() {
-			if s.videoState(ctx, c) != nil {
-				return errors.New("pointer not calibrated, and the screen is not visible: turn on Screen Mirroring, then run esp32agent calibrate")
-			}
-			if err := p.Calibrate(ctx); err != nil {
-				return err
-			}
+		size := image.Pt(int(w), int(h))
+		if located && expected != size {
+			return errors.New("screen dimensions changed after target lookup; retry on the current screen")
 		}
+		ctx = context.WithValue(ctx, inputSizeKey{}, size)
 		pt := func(i int) (float64, float64) { return req.Pts[i] / w, req.Pts[i+1] / h }
 		switch req.Cmd {
 		case "tap":

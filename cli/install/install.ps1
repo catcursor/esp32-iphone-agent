@@ -4,6 +4,7 @@
 #      ESP32AGENT_VERSIONS_URL (optional custom versions.json),
 #      ESP32AGENT_ARCHIVE=C:\path\esp32agent_windows_<arch>.zip for a local build (checksums.txt next to it, or
 #      ESP32AGENT_CHECKSUMS), ESP32AGENT_FFMPEG=yes|no to answer the ffmpeg question without a prompt.
+#      ESP32AGENT_OCR_ARCHIVE may point at the pinned upstream OCR ZIP for offline installation.
 $ErrorActionPreference = 'Stop'
 $repo = 'catcursor/esp32-iphone-agent'
 $binDir = if ($env:ESP32AGENT_BIN_DIR) { $env:ESP32AGENT_BIN_DIR } else { Join-Path $HOME '.local\bin' }
@@ -81,6 +82,16 @@ try {
     $dest = Join-Path $binDir 'esp32agent.exe'
     Copy-Item (Join-Path $tmp 'esp32agent.exe') $dest -Force
     Write-Host "installed $dest ($(& $dest version))"
+    # Older releases do not advertise the optional OCR installer.
+    $helpText = & {
+        # Windows PowerShell 5 surfaces native help written to stderr as errors.
+        $ErrorActionPreference = 'Continue'
+        & $dest --help 2>&1 | Out-String
+    }
+    if ($helpText -match '(?m)^\s*ocr install\s') {
+        & $dest ocr install
+        if ($LASTEXITCODE -ne 0) { throw 'CLI installed; retry its offline engine setup with esp32agent ocr install' }
+    }
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

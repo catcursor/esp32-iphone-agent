@@ -3,7 +3,6 @@ package app
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 
@@ -43,7 +42,7 @@ func schema(required []string, props map[string]any) map[string]any {
 var (
 	numProp = map[string]any{"type": "number"}
 	tools   = []tool{
-		{"screenshot", "The iPhone's screen now (after the last action has settled). Coordinates for the other tools are pixels of this image.", schema(nil, map[string]any{})},
+		{"screenshot", "The mirrored screen and local OCR results for that frame. OCR item tap points use full-screen pixels.", schema(nil, map[string]any{})},
 		{"tap", "Tap at x, y (screenshot pixels).", schema([]string{"x", "y"}, map[string]any{"x": numProp, "y": numProp,
 			"count": map[string]any{"type": "integer", "description": "taps in a row at the point; 2 is a double tap (default 1)"}})},
 		{"longpress", "Press and hold at x, y.", schema([]string{"x", "y"}, map[string]any{"x": numProp, "y": numProp,
@@ -173,14 +172,15 @@ func (a *App) callTool(name string, args map[string]any) map[string]any {
 		return textResult(r.Error, true)
 	}
 	if name == "screenshot" {
-		var d struct {
-			Format, Data  string
-			Width, Height int
+		var d daemon.Screenshot
+		if json.Unmarshal(r.Raw, &d) != nil || d.Data == "" {
+			return textResult("invalid screenshot from daemon", true)
 		}
-		json.Unmarshal(r.Raw, &d)
+		encoded := d.Data
+		d.Data = ""
 		return map[string]any{"content": []map[string]any{
-			{"type": "image", "data": d.Data, "mimeType": "image/" + d.Format},
-			{"type": "text", "text": fmt.Sprintf("%dx%d screenshot; tap coordinates are pixels of this image", d.Width, d.Height)},
+			{"type": "image", "data": encoded, "mimeType": "image/" + d.Format},
+			{"type": "text", "text": string(raw(d))},
 		}, "isError": false}
 	}
 	if name == "phone_audio" {

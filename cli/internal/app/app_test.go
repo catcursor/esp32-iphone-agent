@@ -162,10 +162,11 @@ func TestSimPairScreenshotTapText(t *testing.T) {
 		t.Fatalf("screenshot image: %v", err)
 	}
 
-	// testsrc shows no pointer to calibrate on: use a known span
+	// The simulator plays a static video fixture. A saved span alone cannot
+	// authorize a click when the pointer cannot be observed moving on screen.
 	os.WriteFile(config.CalibrationPath(dir, "246f28aa6ad5"), []byte(`{"w":400,"h":860,"moves":"axis"}`), 0o600)
-	if o := run(t, a, "io", "tap", "240,520"); o.Status != "ok" {
-		t.Fatalf("tap: %+v", o)
+	if o := run(t, a, "io", "tap", "240,520"); o.Status != "error" {
+		t.Fatalf("tap accepted on a screen without a trackable pointer: %+v", o)
 	}
 	if o := run(t, a, "io", "text", "拿铁 ok"); o.Status != "ok" {
 		t.Fatalf("text: %+v", o)
@@ -197,7 +198,7 @@ func TestSimPairScreenshotTapText(t *testing.T) {
 	a.mcp(strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"screenshot","arguments":{}}}` + "\n"))
 	var resp struct {
 		Result struct {
-			Content []struct{ Type, Data, MimeType string }
+			Content []struct{ Type, Data, MimeType, Text string }
 			IsError bool
 		}
 	}
@@ -208,10 +209,18 @@ func TestSimPairScreenshotTapText(t *testing.T) {
 	if raw, err := base64.StdEncoding.DecodeString(resp.Result.Content[0].Data); err != nil || !bytes.HasPrefix(raw, []byte("\x89PNG")) {
 		t.Fatal("mcp image is not a PNG")
 	}
+	var metadata map[string]json.RawMessage
+	if len(resp.Result.Content) != 2 || json.Unmarshal([]byte(resp.Result.Content[1].Text), &metadata) != nil ||
+		metadata["ocr"] == nil || metadata["source_width"] == nil || metadata["data"] != nil {
+		t.Fatal("MCP screenshot is missing the matching frame's geometry or OCR")
+	}
 
 	time.Sleep(100 * time.Millisecond)
 	logged, _ := os.ReadFile(filepath.Join(dir, "sim.log"))
-	for _, want := range []string{" stream on\n", " home\n", " move 200 0\n", " move 0 430\n", " click\n", " type natie\n", " key space\n", " type ok\n"} {
+	if strings.Contains(string(logged), " click\n") {
+		t.Fatal("board received a click despite failed pointer verification")
+	}
+	for _, want := range []string{" stream on\n", " home\n", " type natie\n", " key space\n", " type ok\n"} {
 		if !strings.Contains(string(logged), want) {
 			t.Errorf("the board never got %q:\n%s", strings.TrimSpace(want), logged)
 		}

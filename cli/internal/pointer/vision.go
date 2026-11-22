@@ -68,18 +68,28 @@ func LocateBack(before, after, back image.Image, near Point, shift float64, reac
 		return Point{}, false
 	}
 	var pts [][2]int
+	threshold, minPixels := 30, 15
+	if c != nil {
+		// The iOS pointer is translucent. Against some backgrounds neither edge
+		// changes by 30 gray levels. A confirmed out-and-back motion allows a
+		// lower threshold, while requiring a larger coherent region to reject noise.
+		threshold, minPixels = 12, max(24, min(w, h)/10)
+	}
 	for y := top; y < bottom; y++ {
 		for x := left; x < right; x++ {
 			i := y*w + x
-			if d := int(a.Px[i]) - int(b.Px[i]); d <= 30 && d >= -30 {
+			out := int(a.Px[i]) - int(b.Px[i])
+			if out <= threshold && out >= -threshold {
 				continue
 			}
 			if c != nil {
-				if d := int(c.Px[i]) - int(b.Px[i]); d <= 30 && d >= -30 {
-					continue // not moved back
+				back := int(c.Px[i]) - int(b.Px[i])
+				if out*back <= 0 || back <= threshold && back >= -threshold {
+					continue // the return must undo the same brightness change
 				}
-				if d := int(c.Px[i]) - int(a.Px[i]); d > 30 || d < -30 {
-					continue // changed on its own
+				restoreTolerance := max(6, max(out, -out)/2)
+				if d := out - back; d > restoreTolerance || d < -restoreTolerance {
+					continue // the original brightness must actually return
 				}
 			}
 			pts = append(pts, [2]int{x, y})
@@ -87,16 +97,37 @@ func LocateBack(before, after, back image.Image, near Point, shift float64, reac
 	}
 	pts = biggestBlob(pts, max(4, w/80))
 	n, sx, sy := len(pts), 0, 0
+	var bright, darkX, brightX int
 	minX, maxX, minY, maxY := w, -1, h, -1
 	for _, p := range pts {
 		x, y := p[0], p[1]
 		sx += x - left
 		sy += y - top
+		if c != nil {
+			if a.Px[y*w+x] > b.Px[y*w+x] {
+				bright++
+				brightX += x
+			} else {
+				darkX += x
+			}
+		}
 		minX, maxX, minY, maxY = min(minX, x), max(maxX, x), min(minY, y), max(maxY, y)
 	}
 	area := (right - left) * (bottom - top)
-	if n < 15 || n > area/4 { // nothing moved, or more than a pointer
+	if n < minPixels || n > area/4 { // nothing moved, or more than a pointer
 		return Point{}, false
+	}
+	if c != nil {
+		// A horizontal nudge exposes background at one edge and covers it at
+		// the other. A blinking badge can also change and return, in one place.
+		dark := n - bright
+		if min(dark, bright) < max(4, n/12) {
+			return Point{}, false
+		}
+		distance := float64(brightX)/float64(bright) - float64(darkX)/float64(dark)
+		if distance > -2 && distance < 2 {
+			return Point{}, false
+		}
 	}
 	if float64(maxX-minX) > 0.15*fw || float64(maxY-minY) > 0.07*fh {
 		return Point{}, false // not one compact spot

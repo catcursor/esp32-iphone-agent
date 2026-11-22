@@ -14,6 +14,7 @@ import (
 	"image"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -210,11 +211,18 @@ func (p *Pointer) Calibrate(ctx context.Context) error {
 
 // findPointer wiggles the pointer and finds it anywhere on screen (the span may still be unknown).
 func (p *Pointer) findPointer(ctx context.Context) (Point, bool, error) {
+	pt, ok, err := p.observe(ctx, Nudge, 0.025, Point{0.5, 0.5}, Point{0.5, 0.5})
+	return pt, ok && pt.X > 0.03 && pt.X < 0.97 && pt.Y > 0.03 && pt.Y < 0.97, err
+}
+
+// Observe the outward nudge and its return. The return frame distinguishes the
+// pointer from an animation that happened elsewhere while the pointer moved.
+func (p *Pointer) observe(ctx context.Context, nudge int, shift float64, near, reach Point) (Point, bool, error) {
 	// iOS glides the pointer to a new spot over ~1 s, and the first frames arrive ~0.2 s late: a shorter wait took
 	// a frame from before the stop's move as "before" (2026-11-06).
 	p.screen.Settled(ctx, 400*time.Millisecond, 800*time.Millisecond, 3*time.Second)
 	before, sent := p.screen.Frame(), time.Now()
-	if err := p.send(ctx, "move %d 0", Nudge); err != nil {
+	if err := p.send(ctx, "move %d 0", nudge); err != nil {
 		return Point{}, false, err
 	}
 	after := p.screen.Fresh(ctx, sent, FreshWait)
@@ -223,7 +231,7 @@ func (p *Pointer) findPointer(ctx context.Context) (Point, bool, error) {
 		after = p.screen.Frame()
 	}
 	sent = time.Now()
-	if err := p.send(ctx, "move -%d 0", Nudge); err != nil {
+	if err := p.send(ctx, "move %d 0", -nudge); err != nil {
 		return Point{}, false, err
 	}
 	var back image.Image
@@ -231,11 +239,14 @@ func (p *Pointer) findPointer(ctx context.Context) (Point, bool, error) {
 		p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond)
 		back = p.screen.Frame()
 	}
-	pt, ok := LocateBack(before, after, back, Point{0.5, 0.5}, 0.025, Point{0.5, 0.5})
-	if !ok || pt.X <= 0.03 || pt.X >= 0.97 || pt.Y <= 0.03 || pt.Y >= 0.97 {
+	if back == nil || before == nil || back.Bounds() != before.Bounds() {
 		return Point{}, false, nil
 	}
-	return pt, true, nil
+	pt, ok := LocateBack(before, after, back, near, shift, reach)
+	if !ok && reach.X < 0.5 {
+		pt, ok = LocateBack(before, after, back, Point{0.5, 0.5}, shift, Point{0.5, 0.5})
+	}
+	return pt, ok, nil
 }
 
 // FinishCalibration: x, y is where the pointer ended up after `home` + `move 200 200` (one point).
@@ -259,8 +270,15 @@ func (p *Pointer) save() error {
 			s.Seen[axis] = append(s.Seen[axis], []float64{v[0], v[1]})
 		}
 	}
-	raw, _ := json.Marshal(s)
-	return os.WriteFile(p.file, raw, 0o600)
+	f, err := os.CreateTemp(filepath.Dir(p.file), ".calibration-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err := errors.Join(json.NewEncoder(f).Encode(s), f.Close()); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), p.file)
 }
 
 // ErrNotCalibrated: run Calibrate first.
@@ -274,7 +292,7 @@ func (p *Pointer) Point(ctx context.Context, x, y float64, aim bool) error {
 	if err := p.moveTo(ctx, p.dx(x), p.dy(y), true); err != nil {
 		return err
 	}
-	if aim && p.screen != nil {
+	if aim {
 		return p.aim(ctx, x, y)
 	}
 	return nil
@@ -287,8 +305,7 @@ func (p *Pointer) aim(ctx context.Context, x, y float64) error {
 		return err
 	}
 	if !ok {
-		p.Log(fmt.Sprintf("aim (%.3f, %.3f): pointer not found", x, y))
-		return nil
+		return fmt.Errorf("aim: pointer not visible at (%.3f, %.3f); keep the mirrored screen still and retry", x, y)
 	}
 	if math.Max(math.Abs(found.X-x), math.Abs(found.Y-y)) <= MaxMiss { // learn from normal drift only
 		p.remember("x", [2]float64{p.Fix(x, "x"), found.X})
@@ -306,6 +323,16 @@ func (p *Pointer) aim(ctx context.Context, x, y float64) error {
 	if p.pos != nil {
 		p.pos = &[2]int{p.pos[0] + mx, p.pos[1] + my}
 	}
+	found, ok, err = p.measure(ctx, x, y)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("aim: pointer not visible after correction")
+	}
+	if math.Abs(found.X-x) > AimTolerance || math.Abs(found.Y-y) > AimTolerance {
+		return fmt.Errorf("aim: pointer remained outside tolerance after correction (wanted %.3f, %.3f; observed %.3f, %.3f)", x, y, found.X, found.Y)
+	}
 	return nil
 }
 
@@ -318,39 +345,8 @@ func (p *Pointer) measure(ctx context.Context, x, y float64) (Point, bool, error
 	if x >= 0.9 { // stay clear of the screen edge
 		nudge = -Nudge
 	}
-	p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond) // pointer at rest
-	before, sent := p.screen.Frame(), time.Now()
-	if err := p.send(ctx, "move %d 0", nudge); err != nil {
-		return Point{}, false, err
-	}
-	after := p.screen.Fresh(ctx, sent, 1200*time.Millisecond)
-	if after != nil {
-		p.screen.Settled(ctx, 100*time.Millisecond, 50*time.Millisecond, 400*time.Millisecond)
-		after = p.screen.Frame()
-	}
-	if err := p.send(ctx, "move %d 0", -nudge); err != nil {
-		return Point{}, false, err
-	}
 	shift := float64(nudge) / float64(p.Span.W)
-	if pt, ok := Locate(before, after, Point{x, y}, shift, Point{0.12, 0.08}); ok {
-		return pt, true, nil
-	}
-	pt, ok := Locate(before, after, Point{0.5, 0.5}, shift, Point{0.5, 0.5})
-	return pt, ok, nil
-}
-
-// Verify moves to a known point and measures the miss (fraction of the screen); ok=false: pointer not found.
-func (p *Pointer) Verify(ctx context.Context, x, y float64) (float64, bool, error) {
-	if err := p.Point(ctx, x, y, false); err != nil {
-		return 0, false, err
-	}
-	found, ok, err := p.measure(ctx, x, y)
-	if err != nil || !ok {
-		return 0, false, err
-	}
-	e := math.Max(math.Abs(found.X-x), math.Abs(found.Y-y))
-	p.Quality = &e
-	return e, true, p.save()
+	return p.observe(ctx, nudge, shift, Point{x, y}, Point{0.12, 0.08})
 }
 
 // Drift is how far the learned correction has moved targets away from the plain calibration.
@@ -533,12 +529,16 @@ func (p *Pointer) Key(ctx context.Context, combo string) error { return p.send(c
 // GoHome goes to the Home Screen like the app's leaveApp: the consumer-control Home key, then Cmd+H, then the flick
 // up from the home bar, each until the screen really changes. The board acknowledges a key iOS ignores (seen on
 // an iPhone in a video app, 2026-10-21), so an "ok" alone proves nothing; without video the key's "ok" is all there is.
-func (p *Pointer) GoHome(ctx context.Context) error {
+func (p *Pointer) GoHome(ctx context.Context, prepareSwipe func() error) error {
 	tries := []func() error{
 		func() error { return p.send(ctx, "homescreen") },
 		func() error { return p.Key(ctx, "cmd+h") },
 		func() error {
-			if !p.Calibrated() {
+			if prepareSwipe != nil {
+				if err := prepareSwipe(); err != nil {
+					return err
+				}
+			} else if !p.Calibrated() {
 				if err := p.Calibrate(ctx); err != nil {
 					return err
 				}

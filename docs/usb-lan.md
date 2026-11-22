@@ -15,6 +15,7 @@ $bin = Join-Path $env:USERPROFILE '.local\bin'
 New-Item -ItemType Directory -Force $bin | Out-Null
 go build -C cli -o (Join-Path $bin 'esp32agent.exe') ./cmd/esp32agent
 $env:Path = "$bin;$env:Path"
+esp32agent ocr install
 $skills = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME 'skills' } else { Join-Path $env:USERPROFILE '.codex\skills' }
 New-Item -ItemType Directory -Force $skills | Out-Null
 Copy-Item -Recurse -Force ./skills/iphone-lan $skills
@@ -30,11 +31,19 @@ Copy-Item -Recurse -Force ./skills/iphone-lan $skills
 
 | 操作 | 命令示例 |
 | --- | --- |
-| 保存手机截图 | `esp32agent screenshot --output screen.png` |
+| 保存手机截图并取得同帧文字框 | `esp32agent screenshot --output screen.png` |
 | 用 Sense 镜头拍照 | `esp32agent photo --output desk.jpg` |
-| 校准指针 | `esp32agent calibrate` |
+| 检查已有指针映射、重新校准 | `esp32agent calibrate --verify`、`esp32agent calibrate` |
 | 点按、滑动 | `esp32agent io tap 150,300`，`esp32agent io swipe 160,600,160,200` |
 | 文本、按键、主屏幕 | `esp32agent io text "hello"`，`esp32agent io keys enter`，`esp32agent io button HOME` |
+
+## 截图和点按共用哪套坐标
+
+部署时在电脑运行 `esp32agent ocr install`，从外部仓库下载并校验固定版本的 [RapidOCR-CLI 运行时与识别模型](https://github.com/AwesomeDog/RapidOCR-CLI/releases/tag/v0.1.0)。每次执行 `screenshot`，它都会就地识别这一帧，将图片路径和 OCR 结果一起返回。模型可以读取 `data.ocr.items`，按周围文字选中正确的一行；定位图标或开关时也可以直接看图片。
+
+`box` 和 `center` 使用输出图片像素，每项的 `tap.x`、`tap.y` 使用完整镜像像素，可直接传给 `esp32agent io tap X,Y`。默认输出为原尺寸。缩放时保留 `source_width` 和 `source_height`，便于把自行选取的图像点还原。
+
+每个控制会话首次实际点按、长按或滑动之前，CLI 会移动辅助触控光标，将镜像中的两个实测落点与预期坐标比对。如果映射不合格，程序会尝试重新校准，仍无法验证则停止该手势。`esp32agent calibrate --verify` 可主动查看逐点误差，适合在静止、光标可见的页面执行。
 
 ## 修改网络
 

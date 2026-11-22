@@ -18,6 +18,7 @@ import (
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/owner"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/textloc"
 )
 
 // Version is set at build time (-ldflags "-X .../internal/app.Version=1.2.3").
@@ -25,6 +26,8 @@ var Version = "dev"
 
 const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board.
 
+  ocr install                      install the pinned offline RapidOCR engine and models
+  ocr recognize                    read an image from stdin and write OCR boxes as JSON
   pair-usb PORT                    save this board's owner credential for direct Wi-Fi control
   target HOST                      update the network address of the USB-paired board
   photo [--output PATH]            take a photo with the board's camera
@@ -33,7 +36,10 @@ const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board.
   devices                          show the USB-paired board, or discover nearby Bluetooth boards
   pair | unpair                    manage legacy Bluetooth pairing
   screenshot [--format png|jpeg] [--quality N] [--scale F] [--max-size N] [--output PATH|-]
-  io tap X,Y [--aim] [--count N]   coordinates are screenshot pixels; --count 2 double-taps
+                                   OCR and geometry in JSON; with --output -, image on stdout and JSON on stderr
+  io tap X,Y [--aim] [--count N]   full-screen pixels (use OCR item's tap point); --count 2 double-taps
+  io tap-text LABEL [--locate] [--aim]   find a unique visible text label on the full screen
+  io tap-grid X,Y --step N [--locate] [--aim]   graph units per grid cell (or NX,NY)
   io longpress X,Y [--duration MS]
   io swipe X1,Y1,X2,Y2
   io text 'TEXT'                   ASCII; Chinese is typed as pinyin
@@ -49,7 +55,7 @@ const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board.
   net hotspot-password             show the board's generated hotspot password while in hotspot mode
   net ipv4                         show the board's station IPv4 policy
   net static IPv4 | net dhcp       save a static address or use DHCP on the current station network
-  calibrate                        measure the pointer (automatic on the first tap)
+  calibrate [--verify]             measure and verify pointer mapping, or only check the saved mapping
   listen                           what the iPhone played in the last 30 s, as words (or why it can't be heard)
   listen on|off                    hear the phone's sound while it mirrors (off by default)
   listen mode phone|local          phone: the ESP32 Agent app's words (default); local: whisper.cpp on this
@@ -139,6 +145,8 @@ func (a *App) Run(args []string) int {
 	dev := new(string)
 	fs := newFS(dev)
 	switch cmd {
+	case "ocr":
+		return a.ocr(rest)
 	case "version":
 		return a.print(daemon.Response{Status: "ok", Data: map[string]string{"version": Version}})
 	case "daemon":
@@ -170,7 +178,17 @@ func (a *App) Run(args []string) int {
 			return a.fail(errors.New("usage: esp32agent skill install"))
 		}
 		return a.skillInstall()
-	case "devices", "pair", "unpair", "calibrate":
+	case "calibrate":
+		verify := fs.Bool("verify", false, "check the saved pointer mapping without remeasuring")
+		pos, err := parse(fs, rest)
+		if err != nil {
+			return a.fail(err)
+		}
+		if len(pos) != 0 {
+			return a.fail(errors.New("usage: esp32agent calibrate [--verify]"))
+		}
+		return a.call(daemon.Request{Cmd: cmd, Device: *dev, Verify: *verify})
+	case "devices", "pair", "unpair":
 		if _, err := parse(fs, rest); err != nil {
 			return a.fail(err)
 		}
@@ -244,6 +262,8 @@ func newFS(dev *string) *flag.FlagSet {
 
 func (a *App) io(fs *flag.FlagSet, dev *string, args []string) int {
 	aim := fs.Bool("aim", false, "find the pointer on screen and correct a miss before tapping")
+	locate := fs.Bool("locate", false, "return the target in full-size screenshot pixels without tapping")
+	step := fs.String("step", "", "graph units per grid cell on both axes, or separate X,Y steps")
 	ms := fs.Int("duration", 1000, "long press, ms")
 	count := fs.Int("count", 1, "taps in a row at the point (2: double tap)")
 	pos, err := parse(fs, args)
@@ -251,11 +271,40 @@ func (a *App) io(fs *flag.FlagSet, dev *string, args []string) int {
 		return a.fail(err)
 	}
 	if len(pos) == 0 {
-		return a.fail(errors.New("usage: esp32agent io tap|longpress|swipe|text|keys|button ..."))
+		return a.fail(errors.New("usage: esp32agent io tap|tap-text|tap-grid|longpress|swipe|text|keys|button ..."))
 	}
 	sub, arg := pos[0], strings.Join(pos[1:], " ")
 	req := daemon.Request{Cmd: sub, Device: *dev, Aim: *aim, Ms: *ms, Count: *count, Text: arg}
+	if *locate && sub != "tap-text" && sub != "tap-grid" {
+		return a.fail(errors.New("--locate is available for tap-text and tap-grid"))
+	}
+	if *step != "" && sub != "tap-grid" {
+		return a.fail(errors.New("--step is available for tap-grid"))
+	}
 	switch sub {
+	case "tap-text":
+		if strings.TrimSpace(arg) == "" {
+			return a.fail(errors.New("usage: esp32agent io tap-text LABEL [--locate] [--aim]"))
+		}
+		req.Locate = *locate
+	case "tap-grid":
+		if len(pos) != 2 || *step == "" {
+			return a.fail(errors.New("usage: esp32agent io tap-grid X,Y --step N (or NX,NY) [--locate] [--aim]"))
+		}
+		if req.Pts, err = coords(pos[1], 2); err != nil {
+			return a.fail(err)
+		}
+		units := *step
+		if !strings.Contains(units, ",") {
+			units += "," + units
+		}
+		if req.Step, err = coords(units, 2); err != nil {
+			return a.fail(err)
+		}
+		if err = req.CheckGrid(); err != nil {
+			return a.fail(err)
+		}
+		req.Locate, req.Text = *locate, ""
 	case "tap", "longpress", "swipe":
 		n := 2
 		if sub == "swipe" {
@@ -293,10 +342,7 @@ func (a *App) screenshot(fs *flag.FlagSet, dev *string, args []string) int {
 	}
 	var r struct {
 		daemon.Response
-		Data struct {
-			Format, Data, Device string
-			Width, Height        int
-		} `json:"data"`
+		Data daemon.Screenshot `json:"data"`
 	}
 	if err := json.Unmarshal(line, &r); err != nil {
 		return a.fail(err)
@@ -304,23 +350,41 @@ func (a *App) screenshot(fs *flag.FlagSet, dev *string, args []string) int {
 	if r.Status != "ok" {
 		return a.print(r.Response)
 	}
-	img, err := base64.StdEncoding.DecodeString(r.Data.Data)
+	return a.writeScreenshot(r.Data, *output)
+}
+
+func (a *App) writeScreenshot(shot daemon.Screenshot, output string) int {
+	img, err := base64.StdEncoding.DecodeString(shot.Data)
 	if err != nil {
 		return a.fail(err)
 	}
-	if *output == "-" {
-		a.Out.Write(img)
+	shot.Data = ""
+	if shot.OCR.Status == "" {
+		// Older daemons can still supply the image but cannot provide its OCR.
+		shot.OCR = textloc.Result{Status: "unavailable", Items: []textloc.Item{},
+			Error: "running daemon did not return OCR metadata; run esp32agent daemon stop and retry"}
+	}
+	if output == "-" {
+		if _, err := a.Out.Write(img); err != nil {
+			if a.Err != nil {
+				fmt.Fprintln(a.Err, err)
+			}
+			return 1
+		}
+		if a.Err != nil {
+			json.NewEncoder(a.Err).Encode(daemon.Response{Status: "ok", Data: shot})
+		}
 		return 0
 	}
-	path, err := screenshotPath(*output, r.Data.Device, r.Data.Format)
+	path, err := screenshotPath(output, shot.Device, shot.Format)
 	if err != nil {
 		return a.fail(err)
 	}
 	if err := os.WriteFile(path, img, 0o644); err != nil {
 		return a.fail(err)
 	}
-	return a.print(daemon.Response{Status: "ok", Data: map[string]any{"format": r.Data.Format, "filePath": path,
-		"width": r.Data.Width, "height": r.Data.Height}})
+	shot.FilePath = path
+	return a.print(daemon.Response{Status: "ok", Data: shot})
 }
 
 // screenshotPath: a file path as given, or screenshot-<device>-<time>.<ext> in a directory (default: cwd).

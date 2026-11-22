@@ -2,11 +2,14 @@ package pointer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -132,7 +135,7 @@ func TestGoHomeFallsBackWithoutTheHomeKey(t *testing.T) {
 	d := &fakeDevice{fail: map[string]bool{"homescreen": true}}
 	p := newPointer(t, d, nil)
 	p.FinishCalibration(0.5, 0.25)
-	if err := p.GoHome(context.Background()); err != nil {
+	if err := p.GoHome(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if d.sent[0] != "homescreen" || d.sent[1] != "key cmd+h" || d.sent[len(d.sent)-1] != "release" {
@@ -210,6 +213,44 @@ func TestCalibrationFailsWhenThePointerIsInvisible(t *testing.T) {
 	}
 }
 
+func TestVerificationUsesHeldOutPointsWithoutChangingCalibration(t *testing.T) {
+	d := &fakeDevice{}
+	p := newPointer(t, d, &fakeScreen{d})
+	r, err := p.Recalibrate(t.Context())
+	if err != nil || !r.Verified || len(r.Samples) != 2 {
+		t.Fatalf("calibration %+v: %v", r, err)
+	}
+	original, err := os.ReadFile(p.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Span.W = 510 // a changed mouse sensitivity or stale mapping
+	r, err = p.CheckAccuracy(t.Context())
+	if !errors.Is(err, ErrVerification) || r.Verified || len(r.Samples) == 0 || r.Samples[0].ErrorPx <= r.ToleranceX {
+		t.Fatalf("inaccurate mapping %+v: %v", r, err)
+	}
+	p.screen = blankScreen{}
+	if _, err := p.Recalibrate(t.Context()); err == nil {
+		t.Fatal("calibrated against an invisible pointer")
+	}
+	after, err := os.ReadFile(p.file)
+	if err != nil || string(original) != string(after) {
+		t.Fatal("unsuccessful verification or recalibration overwrote the saved mapping", err)
+	}
+	if slices.Contains(d.sent, "click") || slices.Contains(d.sent, "press") {
+		t.Fatal("verification pressed on the screen", d.sent)
+	}
+}
+
+func TestExplicitAimRequiresVisiblePointer(t *testing.T) {
+	d := &fakeDevice{}
+	p := newPointer(t, d, blankScreen{})
+	p.Span = &Span{410, 870}
+	if err := p.Tap(t.Context(), .45, .33, true, 1); err == nil || slices.Contains(d.sent, "click") {
+		t.Fatal("clicked despite missing target-level verification", err, d.sent)
+	}
+}
+
 type blankScreen struct{}
 
 func (blankScreen) Live() bool                                                           { return true }
@@ -249,6 +290,32 @@ func TestPointerNotFoundWhenNothingMoved(t *testing.T) {
 	f := frame(262, 856)
 	if _, ok := Locate(f, f, Point{0.5, 0.8}, 12/W, Point{0.12, 0.08}); ok {
 		t.Fatal("found a pointer in two equal frames")
+	}
+}
+
+func TestLowContrastPointerRequiresAReversibleHorizontalMovement(t *testing.T) {
+	const w, h = 360, 640
+	drawCursor := func(cx int, show bool, noise int) image.Image {
+		f := image.NewGray(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				v := 95
+				if show && (x-cx)*(x-cx)+(y-320)*(y-320) <= 12*12 {
+					v -= 21
+				}
+				f.SetGray(x, y, color.Gray{Y: uint8(v + (x+y+noise)%3)})
+			}
+		}
+		return f
+	}
+	before, after, back := drawCursor(160, true, 0), drawCursor(171, true, 1), drawCursor(160, true, 2)
+	center, reach := Point{.5, .5}, Point{.5, .5}
+	p, ok := LocateBack(before, after, back, center, 11./w, reach)
+	if !ok || math.Abs(p.X*w-160) > 2 || math.Abs(p.Y*h-320) > 2 {
+		t.Fatal("missed a translucent cursor", p, ok)
+	}
+	if _, ok := LocateBack(before, drawCursor(160, false, 1), back, center, 11./w, reach); ok {
+		t.Fatal("a blinking stationary disc was mistaken for pointer motion")
 	}
 }
 

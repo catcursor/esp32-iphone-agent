@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"image"
 	"os"
 	"strings"
 	"sync"
@@ -25,8 +26,11 @@ func TestActionsAreRecordedAndKeysPaced(t *testing.T) {
 	}
 	c, s := start(t, fakeTransport{b})
 	call(t, c, Request{Cmd: "pair"})
-	b.Status(`{"up":5000,"ap":"idle","w":480,"h":1040}`)
-	time.Sleep(50 * time.Millisecond)
+	conn, err := s.conn(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointerMirror(conn, b, image.NewRGBA(image.Rect(0, 0, 480, 1040)), image.Pt(400, 860))
 	os.WriteFile(config.CalibrationPath(s.Dir, "246f28aa6ad5"), []byte(`{"w":400,"h":860,"moves":"axis"}`), 0o600)
 
 	if r, _ := call(t, c, Request{Cmd: "tap", Pts: []float64{240, 520}}); r.Status != "ok" {

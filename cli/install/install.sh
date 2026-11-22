@@ -6,6 +6,7 @@
 #      ESP32AGENT_ARCHIVE=/path/esp32agent_<os>_<arch>.tar.gz to install a local build (checksums.txt next to it,
 #      or ESP32AGENT_CHECKSUMS=/path), ESP32AGENT_FFMPEG=yes|no to answer the ffmpeg question without a prompt.
 set -eu
+# ESP32AGENT_OCR_ARCHIVE can point at the pinned upstream OCR tar.gz for offline installation.
 
 REPO=catcursor/esp32-iphone-agent
 BIN_DIR=${ESP32AGENT_BIN_DIR:-$HOME/.local/bin}
@@ -138,6 +139,9 @@ tar -xzf "$tmp/$name" -C "$tmp" esp32agent || die "bad archive $name"
 mkdir -p "$BIN_DIR"
 install -m 755 "$tmp/esp32agent" "$BIN_DIR/esp32agent"
 say "installed $BIN_DIR/esp32agent ($("$BIN_DIR/esp32agent" version))"
+if "$BIN_DIR/esp32agent" --help 2>&1 | grep -q '^[[:space:]]*ocr install[[:space:]]'; then
+  "$BIN_DIR/esp32agent" ocr install || die "CLI installed; retry its offline engine setup with esp32agent ocr install"
+fi
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

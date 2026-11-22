@@ -25,17 +25,20 @@ type Conn struct {
 	ID   string // board id, 12 hex
 	Name string
 
-	mu       sync.Mutex
-	swap     sync.RWMutex // Send holds it shared across a write, attach exclusively: no frame on a replaced session
-	sess     *proto.Session
-	via      string        // the session's link: "ble" or "wifi"
-	quit     chan struct{} // stops the session's reader (a BLE session moved to Wi-Fi keeps its link)
-	bleLink  proto.Link    // the BLE link, kept while the session runs over Wi-Fi: the way back
-	links    int
-	nextID   int
-	pending  map[string]chan string
-	status   map[string]any
-	statusAt time.Time
+	inputMu     sync.Mutex // keep locating a target and sending its input in one operation per device
+	checkedLink int        // inputMu: the session and frame shape that passed the independent pointer check
+	checkedSize image.Point
+	mu          sync.Mutex
+	swap        sync.RWMutex // Send holds it shared across a write, attach exclusively: no frame on a replaced session
+	sess        *proto.Session
+	via         string        // the session's link: "ble" or "wifi"
+	quit        chan struct{} // stops the session's reader (a BLE session moved to Wi-Fi keeps its link)
+	bleLink     proto.Link    // the BLE link, kept while the session runs over Wi-Fi: the way back
+	links       int
+	nextID      int
+	pending     map[string]chan string
+	status      map[string]any
+	statusAt    time.Time
 
 	re        *video.Reassembler
 	dec       *video.Decoder
@@ -219,24 +222,36 @@ func (c *Conn) read(s *proto.Session, quit chan struct{}) {
 	c.detach(s, proto.ErrSession)
 }
 
+type inputSessionKey struct{}
+type inputSizeKey struct{}
+
 // Send runs one command and returns the reply after "ok"; an "err" reply is an error.
 func (c *Conn) Send(ctx context.Context, line string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	c.swap.RLock()
 	c.mu.Lock()
 	s := c.sess
 	if s == nil {
 		c.mu.Unlock()
+		c.swap.RUnlock()
 		return "", proto.ErrSession
+	}
+	if link, guarded := ctx.Value(inputSessionKey{}).(int); guarded && c.links != link && line != "release" {
+		c.mu.Unlock()
+		c.swap.RUnlock()
+		return "", errors.New("input session changed; retry on the current screen")
+	}
+	if size, guarded := ctx.Value(inputSizeKey{}).(image.Point); guarded && line != "release" && (c.frame == nil || size != c.checkedSize || c.checkedLink != c.links) {
+		c.mu.Unlock()
+		c.swap.RUnlock()
+		return "", errors.New("screen changed after pointer verification; retry on the current screen")
 	}
 	c.nextID++
 	id := strconv.Itoa(c.nextID)
 	ch := make(chan string, 1)
 	c.pending[id] = ch
-	c.mu.Unlock()
-	c.swap.RLock() // the session may have moved to another link since: send on the current one
-	c.mu.Lock()
-	if c.sess != nil {
-		s = c.sess
-	}
 	c.mu.Unlock()
 	err := s.Send(id + " " + line)
 	c.swap.RUnlock()
@@ -299,6 +314,9 @@ func (c *Conn) onStatus(b []byte) {
 	}
 	c.statusAt = now
 	notify = m["owner"] == "app" || m["busy"] == float64(1)
+	if ap, has := m["ap"]; has && ap != "streaming" || notify || num(m["fz"]) == 1 {
+		c.checkedSize = image.Point{}
+	}
 	if up, ok := m["up"].(float64); ok {
 		c.learnClock(now, uint32(up))
 	}
@@ -379,6 +397,9 @@ func (c *Conn) onFrame(f video.Frame) {
 	}
 	if hash != c.frameHash || c.frame == nil {
 		c.changed = now
+	}
+	if c.frame != nil && c.frame.Bounds().Size() != f.Img.Bounds().Size() {
+		c.checkedSize = image.Point{}
 	}
 	c.frame, c.frameHash = f.Img, hash
 	for ch := range c.frameSubs {

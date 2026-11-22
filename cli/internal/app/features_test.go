@@ -149,6 +149,16 @@ func TestUpgrade(t *testing.T) {
 	t.Setenv("ESP32AGENT_VERSIONS_URL", srv.URL+"/versions.json")
 	exe := filepath.Join(t.TempDir(), "esp32agent")
 	os.WriteFile(exe, []byte("old"), 0o755)
+	oldExecutable, oldSetup := executable, setupReleaseOCR
+	t.Cleanup(func() { executable, setupReleaseOCR = oldExecutable, oldSetup })
+	provisioned := 0
+	setupReleaseOCR = func(installed string) error {
+		if installed != exe {
+			t.Errorf("provisioned wrong executable: %s", installed)
+		}
+		provisioned++
+		return nil
+	}
 	executable = func() (string, error) { return exe, nil }
 	old := Version
 	defer func() { Version = old }()
@@ -190,6 +200,9 @@ func TestUpgrade(t *testing.T) {
 	}
 	if o := run(t, a, "upgrade", "--force"); o.Status != "ok" {
 		t.Fatalf("dev --force: %+v", o)
+	}
+	if provisioned != 3 {
+		t.Fatalf("installed or repaired OCR %d times, want 3", provisioned)
 	}
 	if upgrade.Compare("0.10.0", "0.9.1") != 1 || upgrade.Compare("1.0.0-rc1", "1.0.0") != -1 || upgrade.Compare("v1.2.3", "1.2.3") != 0 {
 		t.Fatal("semver order")

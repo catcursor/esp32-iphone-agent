@@ -1,10 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -19,6 +21,24 @@ var executable = func() (string, error) {
 		return "", err
 	}
 	return filepath.EvalSymlinks(exe)
+}
+
+// Use the installed binary's own model pin. Older releases selected through
+// custom indices can still be installed without a companion engine.
+var setupReleaseOCR = func(exe string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	help, err := exec.CommandContext(ctx, exe, "--help").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("starting installed CLI: %w", err)
+	}
+	if !bytes.Contains(help, []byte("  ocr install ")) {
+		return nil
+	}
+	if output, err := exec.CommandContext(ctx, exe, "ocr", "install").CombinedOutput(); err != nil {
+		return fmt.Errorf("%w (%s)", err, bytes.TrimSpace(output))
+	}
+	return nil
 }
 
 func (a *App) upgrade(args []string) int {
@@ -55,6 +75,15 @@ func (a *App) upgrade(args []string) int {
 		if dev {
 			return a.fail(fmt.Errorf("this is a development build (%s); esp32agent upgrade --force installs %s", Version, idx.Latest))
 		}
+		// Older upgraders only replaced the CLI. Re-running upgrade completes a
+		// previous installation even when the executable is already current.
+		exe, err := executable()
+		if err != nil {
+			return a.fail(err)
+		}
+		if err := setupReleaseOCR(exe); err != nil {
+			return a.fail(fmt.Errorf("CLI is current; retry esp32agent ocr install: %w", err))
+		}
 		return a.print(daemon.Response{Status: "ok", Data: map[string]any{"current": Version, "latest": idx.Latest,
 			"message": "already up to date"}})
 	}
@@ -69,6 +98,9 @@ func (a *App) upgrade(args []string) int {
 		return a.fail(err)
 	}
 	stopped := a.Client != nil && a.Client.StopRunning() // the next command starts the new daemon
+	if err := setupReleaseOCR(exe); err != nil {
+		return a.fail(fmt.Errorf("upgraded CLI to %s; retry esp32agent ocr install: %w", idx.Latest, err))
+	}
 	return a.print(daemon.Response{Status: "ok", Data: map[string]any{"previous": Version, "version": idx.Latest,
 		"path": exe, "daemon_stopped": stopped}})
 }

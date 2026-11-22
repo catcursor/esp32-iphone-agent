@@ -1,37 +1,24 @@
 ---
 name: esp32agent
-description: See and drive a real iPhone through an ESP32 Agent board (USB mouse/keyboard + AirPlay screen mirroring, reached over Bluetooth). Use when asked to look at, tap, type on, or operate the iPhone, or to test an iOS app on the device.
+description: Control a real iPhone through a USB-paired ESP32 board on the LAN. Use for reading the mirrored screen and its OCR boxes, tapping, typing, swiping, or taking an on-demand Sense camera photo.
 ---
 
 # esp32agent
 
-`esp32agent` talks to an ESP32 Agent board plugged into the iPhone. The board is the phone's USB mouse and
-keyboard and receives its AirPlay screen mirroring; this computer reaches it over Bluetooth. Every command prints
-JSON: `{"status":"ok","data":...}` or `{"status":"error","error":"..."}`. The MCP server (`esp32agent mcp`)
-offers the same as tools: screenshot, tap, longpress, swipe, type_text, press_key, press_button, device_info,
-plus history, intent_list, intent_show, intent_save, memory_recall and memory_add.
+Run the CLI on the computer. For initial setup plug the board into the computer and run `esp32agent pair-usb PORT`. During use, plug it into the iPhone, mirror the screen to ESP32 Agent and enable AssistiveTouch. Check the connection with `esp32agent device info`.
 
-## Setup (once)
-- `esp32agent pair` within 3 minutes of plugging the board into the iPhone.
-- Screen Mirroring on the iPhone: Control Center > Screen Mirroring > ESP32 Agent.
-- `esp32agent calibrate` (also runs by itself on the first tap). It needs the mouse pointer visible on screen.
+## Use the screen and its text
 
-## The loop
-1. `esp32agent screenshot` (writes a PNG in the current directory and prints its `filePath`; read the image).
-   It waits until the screen has settled after your last action, so it never shows the screen from before it.
-2. Decide one action from what you see.
-3. Act, with coordinates in pixels of that screenshot (full size: don't pass `--scale`/`--max-size` if you
-   take coordinates from it):
-   - `esp32agent io tap X,Y` (add `--aim` after a missed tap: finds the pointer and corrects first; `--count 2` double-taps, e.g. to zoom a map or select a word)
-   - `esp32agent io longpress X,Y --duration 1500`
-   - `esp32agent io swipe X1,Y1,X2,Y2` (scroll a list: swipe up from the lower to the upper middle)
-   - `esp32agent io text 'hello'`, `esp32agent io keys enter`, `esp32agent io keys cmd+a`
-   - `esp32agent io button HOME` (Home Screen)
-4. Screenshot again and check the result before the next step. Never chain several taps blind.
+At deployment, use `esp32agent ocr install` to provision the pinned [RapidOCR runtime and models](https://github.com/AwesomeDog/RapidOCR-CLI/releases/tag/v0.1.0) on this computer. Screenshots use this local installation.
 
-When the task depends on what the phone plays (a video, a call, a voice message, a spoken code),
-`esp32agent listen` gives its words from the last 30 s, or says why the phone can't be heard (listening off,
-the app not sharing, no Wi-Fi). The words can be partial or misheard; check the screen when it matters.
+1. Run `esp32agent screenshot`. Open `data.filePath` and read `data.ocr` in the same reply. Local OCR runs synchronously on each screenshot.
+2. Decide one action from the picture and the text. Each OCR item gives its text, its box and center in the emitted picture and its `tap` point in full-screen pixels. Pick among repeated labels using adjacent text, icons and rows. On the Home Screen, use the app name to identify its icon and tap the icon itself. Locate switches and diagrams visually, including when OCR returns no usable text.
+3. Use `esp32agent io tap X,Y` at the chosen full-screen point, measured from the upper left. Use the OCR item's `tap.x,tap.y` as supplied. For an integer pixel selected on a resized image, map its center using `source_rect.x + floor((x + 0.5) * source_rect.width / width)` and the corresponding y/height expression. First undo any crop you applied. For other actions use `io longpress X,Y --duration 1500`, `io swipe X1,Y1,X2,Y2`, `io text 'hello'`, `io keys enter` or `io button HOME`.
+4. Take a fresh screenshot after each action and check what changed before continuing.
+
+Before a session’s first positional input the CLI checks the pointer at two locations on the mirrored screen. A change in screen dimensions requires a fresh check. To inspect a saved mapping on a still screen, use `esp32agent calibrate --verify`. It moves the pointer without clicking and reports observed vs requested positions. Use `esp32agent calibrate` to remeasure. Add `--aim` to a tap to apply visual correction at that point.
+
+For a single known, unique string use `esp32agent io tap-text "Continue" --locate`. For an evenly spaced Cartesian grid with visible zero axes use `esp32agent io tap-grid -25,20 --step 5 --locate`. Omitting `--locate` clicks. Use `esp32agent photo` when the user requests an image from the physical Sense camera.
 
 ## Typing
 - The board types printable ASCII only, one key per character.
@@ -71,11 +58,11 @@ After a task succeeded, save it so the next run is faster:
 - `busy: the app is using the phone`: the iOS app is driving right now. Wait and retry later; don't fight it.
 - `screen mirroring is off`: ask the user to start Screen Mirroring to ESP32 Agent.
 - `video frozen`: ask the user to stop and restart Screen Mirroring.
-- `not paired`: ask the user to replug the board and run `esp32agent pair` within 3 minutes.
+- `not paired`: connect the board to the computer and use `esp32agent pair-usb PORT`.
 - `phone usb asleep`: the phone is locked; ask the user to unlock it.
 - `not supported on ESP32 Agent`: there is no app list, UI tree, file access or webview; work from screenshots.
 
 ## Limits
-- Video comes over Bluetooth: a screenshot can be up to a second behind, animations look choppy.
+- Check the current mirroring and frozen-video status if the picture stops changing.
 - Only HOME as a button; no volume, power, or app install/launch (open apps from the Home Screen or Spotlight:
   `io button HOME`, swipe down in the middle, `io text 'Settings'`, `io keys enter`).
