@@ -40,24 +40,27 @@ type Conn struct {
 	status      map[string]any
 	statusAt    time.Time
 
-	re        *video.Reassembler
-	dec       *video.Decoder
-	ffmpeg    string
-	frame     image.Image
-	frameHash uint64
-	captured  time.Time  // when the board got the shown frame (local clock)
-	updated   time.Time  // when it was decoded here
-	changed   time.Time  // when the shown image last differed from the one before
-	offset    *int64     // local ms − board ms, the smallest seen (≈ the link latency)
-	config    []byte     // last SPS/PPS, for screencapture
-	gop       []video.AU // AUs since the last IDR, so a new screencapture starts at once
-	subs      map[chan video.AU]bool
-	frameSubs map[chan image.Image]bool
-	wake      chan struct{} // closed and replaced on every new frame
+	re            *video.Reassembler
+	dec           *video.Decoder
+	ffmpeg        string
+	frame         image.Image
+	frameHash     uint64
+	captured      time.Time  // when the board got the shown frame (local clock)
+	captureTS     uint32     // board milliseconds for the decoded frame, when supplied
+	updated       time.Time  // when it was decoded here
+	changed       time.Time  // when the shown image last differed from the one before
+	offset        *int64     // local ms − board ms, the smallest seen (≈ the link latency)
+	config        []byte     // last SPS/PPS, for screencapture
+	gop           []video.AU // AUs since the last IDR, so a new screencapture starts at once
+	latestVideoTS uint32     // newest received video frame, including after the GOP replay buffer fills
+	subs          map[chan video.AU]bool
+	frameSubs     map[chan image.Image]bool
+	wake          chan struct{} // closed and replaced on every new frame
 
 	onApp      func() // the board said the app is using it
 	ptr        *pointer.Pointer
-	lastAction time.Time
+	lastInput  time.Time // when the latest screen-affecting HID command was issued
+	buttonDown bool      // distinguish a drag release from a calibration reset
 	lastShot   time.Time
 
 	keyMu   sync.Mutex // held across the gap and the send of key/type commands
@@ -105,6 +108,7 @@ func (c *Conn) attach(s *proto.Session, via string, l proto.Link) error {
 	if via == "wifi" && c.wifi == nil {
 		// A reconnect can follow a reboot. Its clock, screen and status belong to the new session.
 		c.offset, c.frame, c.config, c.gop = nil, nil, nil, nil
+		c.latestVideoTS, c.captureTS = 0, 0
 		c.captured, c.updated, c.changed = time.Time{}, time.Time{}, time.Time{}
 		c.status, c.statusAt = map[string]any{}, time.Time{}
 	}
@@ -252,6 +256,7 @@ func (c *Conn) Send(ctx context.Context, line string) (string, error) {
 	id := strconv.Itoa(c.nextID)
 	ch := make(chan string, 1)
 	c.pending[id] = ch
+	c.noteInput(line, time.Now())
 	c.mu.Unlock()
 	err := s.Send(id + " " + line)
 	c.swap.RUnlock()
@@ -278,6 +283,25 @@ func (c *Conn) Send(ctx context.Context, line string) (string, error) {
 		}
 		return "", errors.New(strings.TrimPrefix(r, "err "))
 	}
+}
+
+// Called with mu held just before issuing a board command. Cursor probes and
+// their initial release do not establish a new application-screen boundary.
+func (c *Conn) noteInput(line string, issued time.Time) {
+	verb, _, _ := strings.Cut(line, " ")
+	switch verb {
+	case "press":
+		c.buttonDown = true
+	case "release":
+		if !c.buttonDown {
+			return
+		}
+		c.buttonDown = false
+	case "click", "key", "type", "homescreen":
+	default:
+		return
+	}
+	c.lastInput = issued
 }
 
 func (c *Conn) appBusy() {
@@ -327,6 +351,11 @@ func (c *Conn) learnClock(now time.Time, boardMs uint32) {
 	off := now.UnixMilli() - int64(boardMs)
 	if c.offset == nil || off < *c.offset {
 		c.offset = &off
+		// On reconnect a replayed keyframe can precede the first live board
+		// clock sample. Re-date that stored frame when the offset is corrected.
+		if c.captureTS != 0 {
+			c.captured = time.UnixMilli(int64(c.captureTS) + off)
+		}
 	}
 }
 
@@ -342,6 +371,9 @@ func (c *Conn) onVideo(chunk []byte, gap bool) {
 	au := c.re.Feed(chunk)
 	if au == nil {
 		return
+	}
+	if au.Flags&video.Config == 0 {
+		c.latestVideoTS = au.TS
 	}
 	switch {
 	case au.Flags&video.Config != 0:
@@ -392,6 +424,7 @@ func (c *Conn) onFrame(f video.Frame) {
 	defer c.mu.Unlock()
 	c.updated = now
 	c.captured = now
+	c.captureTS = f.TS
 	if c.offset != nil && f.TS != 0 {
 		c.captured = time.UnixMilli(int64(f.TS) + *c.offset)
 	}

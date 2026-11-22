@@ -14,5 +14,11 @@ type Screenshot struct {
 	SourceWidth  int            `json:"source_width,omitempty"`
 	SourceHeight int            `json:"source_height,omitempty"`
 	SourceRect   textloc.Box    `json:"source_rect,omitzero"`
+	Freshness    FrameFreshness `json:"freshness,omitzero"`
 	OCR          textloc.Result `json:"ocr"`
+}
+
+type FrameFreshness struct {
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }

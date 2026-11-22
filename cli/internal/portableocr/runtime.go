@@ -19,10 +19,36 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-var ErrUnavailable = errors.New("portable OCR is not installed; run esp32agent ocr install")
+var ErrUnavailable = errors.New("portable OCR is unavailable")
+var ErrIncompatibleLibc = fmt.Errorf("%w: Linux x64 RapidOCR needs glibc 2.38 or later", ErrUnavailable)
+
+// Check before a 190 MB installation or an attempted launch on older Debian.
+// If getconf is unavailable, installation still probes the actual executable.
+var checkHost = sync.OnceValue(func() error {
+	if runtime.GOOS != "linux" {return nil}
+	ctx,cancel:=context.WithTimeout(context.Background(),2*time.Second)
+	defer cancel()
+	out,err:=exec.CommandContext(ctx,"getconf","GNU_LIBC_VERSION").Output()
+	if err!=nil{return nil}
+	return checkLibcVersion(strings.TrimSpace(string(out)))
+})
+
+func checkLibcVersion(version string) error {
+	fields:=strings.Fields(version)
+	if len(fields)!=2 || fields[0]!="glibc"{return nil}
+	parts:=strings.Split(fields[1],".")
+	if len(parts)<2{return nil}
+	major,em:=strconv.Atoi(parts[0])
+	minor,en:=strconv.Atoi(parts[1])
+	if em==nil && en==nil && (major<2 || major==2 && minor<38){
+		return fmt.Errorf("%w (found %s); install Tesseract and the OCR languages needed on the host",ErrIncompatibleLibc,version)
+	}
+	return nil
+}
 
 // Uvicorn can colorize the URL even with stderr redirected on Windows.
 func startupPort(line string) string {
@@ -63,6 +89,7 @@ func release() (asset, string, error) {
 	if !ok {
 		return a, "", fmt.Errorf("%w: no release for %s", ErrUnavailable, platform)
 	}
+	if err:=checkHost();err!=nil{return a,"",err}
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return a, "", err
@@ -77,7 +104,7 @@ func paths(dir string) (exe, models string, err error) {
 	}
 	exe = filepath.Join(dir, name)
 	models = filepath.Join(dir, "_internal", "rapidocr", "models")
-	st, err := os.Stat(exe)
+	st, err := os.Lstat(exe)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", "", ErrUnavailable
 	}
@@ -86,6 +113,9 @@ func paths(dir string) (exe, models string, err error) {
 	}
 	if !st.Mode().IsRegular() || st.Size() == 0 {
 		return "", "", fmt.Errorf("%w: invalid executable", ErrUnavailable)
+	}
+	if err := ensureLauncherMode(exe, st.Mode()); err != nil {
+		return "", "", err
 	}
 	// RapidOCR's upstream loader downloads missing or invalid model files.
 	// Fail before launching it if any bundled defaults are unavailable.
@@ -107,6 +137,18 @@ func paths(dir string) (exe, models string, err error) {
 		}
 	}
 	return exe, models, nil
+}
+
+// Both v0.1.0 Unix archives stored their launcher as 0644. Repair only
+// the owner's execute bit, including caches populated by an older installer.
+func ensureLauncherMode(exe string, mode os.FileMode) error {
+	if runtime.GOOS == "windows" || mode.Perm()&0100 != 0 {
+		return nil
+	}
+	if err := os.Chmod(exe, mode.Perm()|0100); err != nil {
+		return fmt.Errorf("making RapidOCR executable: %w", err)
+	}
+	return nil
 }
 
 var modelHashes = map[string]string{

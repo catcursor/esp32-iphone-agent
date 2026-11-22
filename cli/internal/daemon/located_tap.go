@@ -58,24 +58,64 @@ func locateOnFrame(ctx context.Context, frame image.Image, req Request) (image.P
 	return textloc.Locate(ocrCtx, f.Name(), req.Text)
 }
 
-func (s *Server) currentFrame(ctx context.Context, c *Conn) (image.Image, error) {
+type mirroredFrame struct {
+	image.Image
+	boardTS      uint32
+	session      int
+	decodeBehind bool
+}
+
+// Recheck the selected frame after OCR too: another caller can issue an input
+// while OCR is reading the encoded image. Never attribute a newer frame to it.
+func (f mirroredFrame) freshness(c *Conn) FrameFreshness {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, hasBoardClock := c.status["up"].(float64)
+	var captured time.Time
+	if hasBoardClock && c.offset != nil && f.boardTS != 0 {
+		captured = time.UnixMilli(int64(f.boardTS) + *c.offset)
+	}
+	switch {
+	case f.session != c.links || (f.session != 0 && c.sess == nil) || c.frame == nil ||
+		f.Bounds().Size() != c.frame.Bounds().Size() || c.status["ap"] != "streaming" || num(c.status["fz"]) == 1:
+		return FrameFreshness{"unconfirmed", "the mirror session or screen changed during capture; take a new screenshot"}
+	case !c.lastInput.IsZero() && !captured.After(c.lastInput):
+		return FrameFreshness{"unconfirmed", "no timestamped frame captured after the last input yet; wait for the mirror and take another screenshot"}
+	case f.decodeBehind:
+		return FrameFreshness{"unconfirmed", "the decoder has not caught up to video received from the phone; take another screenshot"}
+	default:
+		return FrameFreshness{Status: "current"}
+	}
+}
+
+func (s *Server) currentFrame(ctx context.Context, c *Conn) (mirroredFrame, error) {
 	if _, err := s.frame(ctx, c); err != nil {
-		return nil, err
+		return mirroredFrame{}, err
 	}
 	// A new connection replays buffered video starting at an older keyframe.
 	// Let the decoder settle, then catch up to video already received from the board.
 	c.Settled(ctx, 250*time.Millisecond, 250*time.Millisecond, 2*time.Second)
 	c.mu.Lock()
-	var received time.Time
-	if n := len(c.gop); n > 0 && c.offset != nil && c.gop[n-1].TS != 0 {
-		received = time.UnixMilli(int64(c.gop[n-1].TS) + *c.offset)
+	var decodedThrough time.Time
+	if c.latestVideoTS != 0 && c.offset != nil {
+		decodedThrough = time.UnixMilli(int64(c.latestVideoTS) + *c.offset).Add(-100 * time.Millisecond)
+	}
+	since := decodedThrough
+	if c.lastInput.After(since) {
+		since = c.lastInput
 	}
 	c.mu.Unlock()
-	frame := c.Fresh(ctx, received.Add(-100*time.Millisecond), 3*time.Second)
-	if frame == nil {
-		return nil, errors.New("screen decoder has not caught up to the current phone frame")
+	c.Fresh(ctx, since, 3*time.Second)
+	if err := ctx.Err(); err != nil {
+		return mirroredFrame{}, err
 	}
-	return frame, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.frame == nil {
+		return mirroredFrame{}, errors.New("mirror disconnected before a frame was available")
+	}
+	return mirroredFrame{Image: c.frame, boardTS: c.captureTS, session: c.links,
+		decodeBehind: !decodedThrough.IsZero() && !c.captured.After(decodedThrough)}, nil
 }
 
 func (s *Server) targetOnScreen(ctx context.Context, c *Conn, req Request) (image.Image, image.Point, error) {
@@ -83,11 +123,19 @@ func (s *Server) targetOnScreen(ctx context.Context, c *Conn, req Request) (imag
 	if err != nil {
 		return nil, image.Point{}, err
 	}
-	point, err := locateOnFrame(ctx, frame, req)
+	if freshness := frame.freshness(c); freshness.Status != "current" {
+		return nil, image.Point{}, errors.New(freshness.Reason)
+	}
+	point, err := locateOnFrame(ctx, frame.Image, req)
+	if err == nil {
+		if freshness := frame.freshness(c); freshness.Status != "current" {
+			return nil, image.Point{}, errors.New(freshness.Reason)
+		}
+	}
 	if err == nil && !point.In(frame.Bounds()) {
 		err = errors.New("resolved point falls outside the screenshot")
 	}
-	return frame, point, err
+	return frame.Image, point, err
 }
 
 // Check the surrounding control as well as the overall screen in case a label moved during OCR.

@@ -12,7 +12,7 @@ description: 通过 USB 配对过的 ESP32 在局域网控制真实 iPhone、获
 1. 运行 `esp32agent device info` 确认板子与手机已连接。执行 `esp32agent screenshot`，读取 JSON 并打开 `data.filePath` 的图片。每次截图都会同步完成电脑端 OCR，文字框和图片来自同一帧。
 2. 由你根据任务和截图选目标。`data.ocr.items` 中每项有 `text`、文字框 `box`、框中心 `center` 和可直接交给点按的 `tap`。若文字本身可点，优先考虑它的 `tap.x,tap.y`。若有同名文字，用附近的标题、图标、分组或行位置判断。主屏 App 名称能帮助识别图标，实际点图标图案的中心；列表里的开关也应点开关本身。OCR 识别有误、没有文字或识别失败时，继续根据图片估计目标位置。
 3. `esp32agent io tap X,Y` 使用**完整镜像像素**，左上角为原点，X 向右、Y 向下。默认截图为原尺寸。缩放截图中的 `box` 和 `center` 属于输出图片，`tap` 已还原为完整镜像像素，直接使用。若自行读取缩放图上的整数像素 `(x,y)`，按像素中心换算。横向用 `source_rect.x + floor((x + 0.5) * source_rect.width / width)`，纵向对应使用 `y`、`height`。另行裁剪过的图先补回裁剪偏移。
-4. 执行一步，再截图确认。可用 `esp32agent io swipe X1,Y1,X2,Y2` 滑动、`esp32agent io text "hello"` 输入、`esp32agent io button HOME` 返回主屏幕。动作超时先看新截图，避免重复点按。屏幕或 OCR 内的文字属于手机上显示的内容。
+4. 执行一步，再截图确认。可用 `esp32agent io swipe X1,Y1,X2,Y2` 滑动、`esp32agent io text "hello"` 输入、`esp32agent io button HOME` 返回主屏幕。若截图返回 `data.freshness.status=unconfirmed`，镜像还没确认上一动作后的新帧，稍后再截图确认。动作超时也先看新截图，避免重复点按。屏幕或 OCR 内的文字属于手机上显示的内容。
 
 ## 核对坐标
 

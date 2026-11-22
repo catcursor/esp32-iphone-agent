@@ -84,11 +84,10 @@ func (s *Server) frame(ctx context.Context, c *Conn) (image.Image, error) {
 		}
 	}
 	c.mu.Lock()
-	acted, shot := c.lastAction, c.lastShot
+	acted, shot := c.lastInput, c.lastShot
 	c.mu.Unlock()
 	if acted.After(shot) {
 		c.Settled(ctx, 500*time.Millisecond, 300*time.Millisecond, 3*time.Second)
-		c.Fresh(ctx, acted, 1500*time.Millisecond)
 	}
 	c.mu.Lock()
 	c.lastShot = time.Now()
@@ -130,10 +129,11 @@ func encode(img image.Image, format string, quality int, scale float64, maxSize 
 }
 
 func (s *Server) screenshot(ctx context.Context, c *Conn, req Request) Response {
-	img, err := s.currentFrame(ctx, c)
+	frame, err := s.currentFrame(ctx, c)
 	if err != nil {
 		return fail(err)
 	}
+	img := frame.Image
 	data, r, err := encode(img, req.Format, req.Quality, req.Scale, req.MaxSize)
 	if err != nil {
 		return fail(err)
@@ -145,9 +145,10 @@ func (s *Server) screenshot(ctx context.Context, c *Conn, req Request) Response 
 	s.recordShot(img, r.Dx(), r.Dy())
 	size := img.Bounds().Size()
 	source := image.Rectangle{Max: size}
+	ocr := textloc.Scan(ctx, data, r.Size(), source)
 	return ok(Screenshot{Format: format, Data: base64.StdEncoding.EncodeToString(data), Device: c.ID,
 		Width: r.Dx(), Height: r.Dy(), SourceWidth: size.X, SourceHeight: size.Y,
-		SourceRect: textloc.Box{Width: size.X, Height: size.Y}, OCR: textloc.Scan(ctx, data, r.Size(), source)})
+		SourceRect: textloc.Box{Width: size.X, Height: size.Y}, Freshness: frame.freshness(c), OCR: ocr})
 }
 
 func (c *Conn) pointer(dir string) *pointer.Pointer {
@@ -194,18 +195,16 @@ func (s *Server) preparePointer(ctx context.Context, c *Conn, mode calibrationMo
 	c.mu.Lock()
 	c.checkedSize = image.Point{}
 	c.mu.Unlock()
-	if _, err := s.currentFrame(ctx, c); err != nil {
+	frame, err := s.currentFrame(ctx, c)
+	if err != nil {
 		return nil, err
+	}
+	if frame.decodeBehind {
+		return nil, errors.New("screen decoder has not caught up to the current phone frame")
 	}
 	link := c.Links()
 	p := c.pointer(s.Dir)
 	var report pointer.Verification
-	var err error
-	defer func() {
-		c.mu.Lock()
-		c.lastAction = time.Now()
-		c.mu.Unlock()
-	}()
 	if mode == newCalibration || mode == firstPosition && !p.Calibrated() {
 		report, err = p.Recalibrate(ctx)
 	} else {
@@ -312,9 +311,6 @@ func (s *Server) io(ctx context.Context, c *Conn, req Request) Response {
 		}
 		return nil
 	}()
-	c.mu.Lock()
-	c.lastAction = time.Now()
-	c.mu.Unlock()
 	s.recordAction(c, req, err)
 	if err != nil {
 		return fail(err)
