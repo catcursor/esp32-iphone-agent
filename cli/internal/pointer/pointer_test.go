@@ -253,6 +253,35 @@ func TestExplicitAimRequiresVisiblePointer(t *testing.T) {
 
 type blankScreen struct{}
 
+type missingProbeFrame struct {
+	fakeScreen
+	missing, calls int
+}
+
+func (s *missingProbeFrame) Fresh(ctx context.Context, since time.Time, wait time.Duration) image.Image {
+	s.calls++
+	if s.calls == s.missing {
+		return nil
+	}
+	return s.fakeScreen.Fresh(ctx, since, wait)
+}
+
+func TestMissingProbeFrameDoesNotRetryAsAnOpticalMiss(t *testing.T) {
+	for _, missing := range []int{1, 2} {
+		d := &fakeDevice{}
+		screen := &missingProbeFrame{fakeScreen: fakeScreen{d}, missing: missing}
+		p := newPointer(t, d, screen)
+		p.Span = &Span{410, 870}
+		report, err := p.CheckAccuracy(t.Context())
+		if !errors.Is(err, ErrProbeFrame) || errors.Is(err, ErrVerification) || report.Verified {
+			t.Fatal(missing, report, err)
+		}
+		if screen.calls != missing || slices.Contains(d.sent, "click") || slices.Contains(d.sent, "press") || d.sent[len(d.sent)-1] != "move -12 0" {
+			t.Fatalf("missing frame %d: expected one probe with the pointer returned, got %v (%d fresh calls)", missing, d.sent, screen.calls)
+		}
+	}
+}
+
 func (blankScreen) Live() bool                                                           { return true }
 func (blankScreen) Frame() image.Image                                                   { return frame(-100, -100) }
 func (blankScreen) Settled(context.Context, time.Duration, time.Duration, time.Duration) {}

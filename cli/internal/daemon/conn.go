@@ -40,22 +40,24 @@ type Conn struct {
 	status      map[string]any
 	statusAt    time.Time
 
-	re            *video.Reassembler
-	dec           *video.Decoder
-	ffmpeg        string
-	frame         image.Image
-	frameHash     uint64
-	captured      time.Time  // when the board got the shown frame (local clock)
-	captureTS     uint32     // board milliseconds for the decoded frame, when supplied
-	updated       time.Time  // when it was decoded here
-	changed       time.Time  // when the shown image last differed from the one before
-	offset        *int64     // local ms − board ms, the smallest seen (≈ the link latency)
-	config        []byte     // last SPS/PPS, for screencapture
-	gop           []video.AU // AUs since the last IDR, so a new screencapture starts at once
-	latestVideoTS uint32     // newest received video frame, including after the GOP replay buffer fills
-	subs          map[chan video.AU]bool
-	frameSubs     map[chan image.Image]bool
-	wake          chan struct{} // closed and replaced on every new frame
+	re             *video.Reassembler
+	dec            *video.Decoder
+	ffmpeg         string
+	frame          image.Image
+	frameHash      uint64
+	captured       time.Time  // when the board got the shown frame (local clock)
+	captureTS      uint32     // board milliseconds for the decoded frame, when supplied
+	updated        time.Time  // when it was decoded here
+	changed        time.Time  // when the shown image last differed from the one before
+	offset         *int64     // local ms − board ms, the smallest seen (≈ the link latency)
+	config         []byte     // last SPS/PPS, for screencapture
+	gop            []video.AU // AUs since the last IDR, so a new screencapture starts at once
+	latestVideoTS  uint32     // newest received video frame, including after the GOP replay buffer fills
+	boardVideoTS   uint32     // latest captured AU according to a single full status (up - vage)
+	haveBoardVideo bool
+	subs           map[chan video.AU]bool
+	frameSubs      map[chan image.Image]bool
+	wake           chan struct{} // closed and replaced on every new frame
 
 	onApp      func() // the board said the app is using it
 	ptr        *pointer.Pointer
@@ -105,6 +107,7 @@ func (c *Conn) attach(s *proto.Session, via string, l proto.Link) error {
 		c.bleLink = l
 	}
 	c.re = video.NewReassembler()
+	c.haveBoardVideo = false
 	if via == "wifi" && c.wifi == nil {
 		// A reconnect can follow a reboot. Its clock, screen and status belong to the new session.
 		c.offset, c.frame, c.config, c.gop = nil, nil, nil, nil
@@ -343,6 +346,19 @@ func (c *Conn) onStatus(b []byte) {
 	}
 	if up, ok := m["up"].(float64); ok {
 		c.learnClock(now, uint32(up))
+		// Compact packets omit vage. Combining their up with vage from an
+		// earlier full packet would make a motionless screen appear to advance.
+		if age, ok := m["vage"].(float64); ok && c.status["ap"] == "streaming" {
+			c.boardVideoTS = uint32(up) - uint32(age)
+			c.haveBoardVideo = true
+		}
+	}
+	if c.status["ap"] != "streaming" {
+		c.haveBoardVideo = false
+	}
+	if c.wake != nil {
+		close(c.wake)
+		c.wake = make(chan struct{})
 	}
 }
 

@@ -150,6 +150,10 @@ func (p *Pointer) screenAspect() float64 {
 // ErrNotFound: calibration could not see the pointer on screen.
 var ErrNotFound = errors.New("calibration: pointer not found on screen (is the mouse pointer visible, AssistiveTouch on, Screen Mirroring on?)")
 
+// ErrProbeFrame means a timestamped observation was unavailable. Measuring a
+// new mouse calibration cannot fix a mirror that has not shown the move yet.
+var ErrProbeFrame = errors.New("no fresh mirrored frame for pointer verification")
+
 // Calibrate finds the pointer on screen at two known distances from the corner and fits the mapping from both.
 func (p *Pointer) Calibrate(ctx context.Context) error {
 	p.pos = nil
@@ -222,6 +226,9 @@ func (p *Pointer) observe(ctx context.Context, nudge int, shift float64, near, r
 	// a frame from before the stop's move as "before" (2026-11-06).
 	p.screen.Settled(ctx, 400*time.Millisecond, 800*time.Millisecond, 3*time.Second)
 	before, sent := p.screen.Frame(), time.Now()
+	if before == nil {
+		return Point{}, false, fmt.Errorf("%w before moving; wait for the live mirror and retry", ErrProbeFrame)
+	}
 	if err := p.send(ctx, "move %d 0", nudge); err != nil {
 		return Point{}, false, err
 	}
@@ -234,13 +241,19 @@ func (p *Pointer) observe(ctx context.Context, nudge int, shift float64, near, r
 	if err := p.send(ctx, "move %d 0", -nudge); err != nil {
 		return Point{}, false, err
 	}
-	var back image.Image
-	if after != nil && p.screen.Fresh(ctx, sent, FreshWait) != nil {
-		p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond)
-		back = p.screen.Frame()
+	if after == nil {
+		return Point{}, false, fmt.Errorf("%w after the outward movement within %s; wait for the live mirror to catch up and retry", ErrProbeFrame, FreshWait)
 	}
-	if back == nil || before == nil || back.Bounds() != before.Bounds() {
-		return Point{}, false, nil
+	if p.screen.Fresh(ctx, sent, FreshWait) == nil {
+		if err := ctx.Err(); err != nil {
+			return Point{}, false, err
+		}
+		return Point{}, false, fmt.Errorf("%w after the return movement within %s; wait for the live mirror to catch up and retry", ErrProbeFrame, FreshWait)
+	}
+	p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond)
+	back := p.screen.Frame()
+	if back == nil || back.Bounds() != before.Bounds() || after.Bounds() != before.Bounds() {
+		return Point{}, false, fmt.Errorf("%w: display changed during observation; retry on a stable screen", ErrProbeFrame)
 	}
 	pt, ok := LocateBack(before, after, back, near, shift, reach)
 	if !ok && reach.X < 0.5 {

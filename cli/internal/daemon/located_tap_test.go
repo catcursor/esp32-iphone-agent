@@ -23,8 +23,9 @@ func pointerMirror(c *Conn, board *proto.FakeBoard, background image.Image, span
 	c.mu.Lock()
 	c.ffmpeg = "simulated"
 	c.mu.Unlock()
-	c.onStatus([]byte(`{"ap":"streaming"}`))
-	c.onFrame(video.Frame{Img: background})
+	start := time.Now()
+	c.onStatus([]byte(`{"ap":"streaming","up":1000,"vage":0}`))
+	c.onFrame(video.Frame{Img: background, TS: 1000})
 	previous := board.Handle
 	var pos image.Point
 	board.Handle = func(cmd string) string {
@@ -53,7 +54,7 @@ func pointerMirror(c *Conn, board *proto.FakeBoard, background image.Image, span
 				}
 			}
 		}
-		c.onFrame(video.Frame{Img: img})
+		c.onFrame(video.Frame{Img: img, TS: 1000 + uint32(time.Since(start).Milliseconds())})
 		return result
 	}
 }

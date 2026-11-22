@@ -195,12 +195,12 @@ func (s *Server) preparePointer(ctx context.Context, c *Conn, mode calibrationMo
 	c.mu.Lock()
 	c.checkedSize = image.Point{}
 	c.mu.Unlock()
-	frame, err := s.currentFrame(ctx, c)
+	frame, err := s.frameWithin(ctx, c, pointerCatchupWait)
 	if err != nil {
 		return nil, err
 	}
-	if frame.decodeBehind {
-		return nil, errors.New("screen decoder has not caught up to the current phone frame")
+	if freshness := frame.freshness(c); freshness.Status != "current" {
+		return nil, fmt.Errorf("pointer verification is waiting for current video: %s", freshness.Reason)
 	}
 	link := c.Links()
 	p := c.pointer(s.Dir)

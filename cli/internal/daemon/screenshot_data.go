@@ -21,4 +21,5 @@ type Screenshot struct {
 type FrameFreshness struct {
 	Status string `json:"status"`
 	Reason string `json:"reason,omitempty"`
+	LagMS  int64  `json:"lag_ms,omitempty"` // decoded frame versus the board's reported latest capture
 }

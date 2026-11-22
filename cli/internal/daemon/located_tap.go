@@ -60,16 +60,22 @@ func locateOnFrame(ctx context.Context, frame image.Image, req Request) (image.P
 
 type mirroredFrame struct {
 	image.Image
-	boardTS      uint32
-	session      int
-	decodeBehind bool
+	boardTS   uint32
+	session   int
+	atCapture FrameFreshness
 }
+
+const pointerCatchupWait = 12 * time.Second
 
 // Recheck the selected frame after OCR too: another caller can issue an input
 // while OCR is reading the encoded image. Never attribute a newer frame to it.
 func (f mirroredFrame) freshness(c *Conn) FrameFreshness {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return f.freshnessLocked(c)
+}
+
+func (f mirroredFrame) freshnessLocked(c *Conn) FrameFreshness {
 	_, hasBoardClock := c.status["up"].(float64)
 	var captured time.Time
 	if hasBoardClock && c.offset != nil && f.boardTS != 0 {
@@ -78,48 +84,76 @@ func (f mirroredFrame) freshness(c *Conn) FrameFreshness {
 	switch {
 	case f.session != c.links || (f.session != 0 && c.sess == nil) || c.frame == nil ||
 		f.Bounds().Size() != c.frame.Bounds().Size() || c.status["ap"] != "streaming" || num(c.status["fz"]) == 1:
-		return FrameFreshness{"unconfirmed", "the mirror session or screen changed during capture; take a new screenshot"}
+		return FrameFreshness{Status: "unconfirmed", Reason: "the mirror session or screen changed during capture; take a new screenshot"}
+	case f.atCapture.Status == "unconfirmed":
+		return f.atCapture
 	case !c.lastInput.IsZero() && !captured.After(c.lastInput):
-		return FrameFreshness{"unconfirmed", "no timestamped frame captured after the last input yet; wait for the mirror and take another screenshot"}
-	case f.decodeBehind:
-		return FrameFreshness{"unconfirmed", "the decoder has not caught up to video received from the phone; take another screenshot"}
+		return FrameFreshness{Status: "unconfirmed", Reason: "no timestamped frame captured after the last input yet; wait for the mirror and take another screenshot"}
 	default:
 		return FrameFreshness{Status: "current"}
 	}
 }
 
 func (s *Server) currentFrame(ctx context.Context, c *Conn) (mirroredFrame, error) {
+	return s.frameWithin(ctx, c, 2*time.Second)
+}
+
+// All three timestamps are from the board. A fresh receipt on this computer
+// may still be replaying minutes of old video, and a genuinely still phone
+// may have captured its most recent frame minutes ago.
+func (c *Conn) snapshotLocked() mirroredFrame {
+	f := mirroredFrame{Image: c.frame, boardTS: c.captureTS, session: c.links}
+	const toleranceMS = 250
+	if c.via == "wifi" && !c.haveBoardVideo {
+		f.atCapture = FrameFreshness{Status: "unconfirmed", Reason: "waiting for the board to report its latest captured frame"}
+	} else if c.haveBoardVideo && c.captureTS == 0 {
+		f.atCapture = FrameFreshness{Status: "unconfirmed", Reason: "decoded frame has no board capture timestamp"}
+	} else if lag := int32(c.boardVideoTS - c.captureTS); c.haveBoardVideo && lag > toleranceMS {
+		// The signed difference handles the millisecond counter rolling over.
+		f.atCapture = FrameFreshness{Status: "unconfirmed", Reason: "the mirror is behind the board's latest capture; wait for video replay to catch up and retry", LagMS: int64(lag)}
+	} else if c.latestVideoTS != 0 && (c.captureTS == 0 || int32(c.latestVideoTS-c.captureTS) > toleranceMS) {
+		f.atCapture = FrameFreshness{Status: "unconfirmed", Reason: "the decoder has not caught up to video received from the phone; take another screenshot"}
+	}
+	return f
+}
+
+func (s *Server) frameWithin(ctx context.Context, c *Conn, wait time.Duration) (mirroredFrame, error) {
 	if _, err := s.frame(ctx, c); err != nil {
 		return mirroredFrame{}, err
 	}
-	// A new connection replays buffered video starting at an older keyframe.
-	// Let the decoder settle, then catch up to video already received from the board.
 	c.Settled(ctx, 250*time.Millisecond, 250*time.Millisecond, 2*time.Second)
-	c.mu.Lock()
-	var decodedThrough time.Time
-	if c.latestVideoTS != 0 && c.offset != nil {
-		decodedThrough = time.UnixMilli(int64(c.latestVideoTS) + *c.offset).Add(-100 * time.Millisecond)
+	return c.awaitCurrentFrame(ctx, wait)
+}
+
+func (c *Conn) awaitCurrentFrame(ctx context.Context, wait time.Duration) (mirroredFrame, error) {
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return mirroredFrame{}, err
+		}
+		c.mu.Lock()
+		f, wake := c.snapshotLocked(), c.wake
+		status := f.freshnessLocked(c)
+		c.mu.Unlock()
+		if f.Image == nil {
+			return mirroredFrame{}, errors.New("mirror disconnected before a frame was available")
+		}
+		if status.Status == "current" {
+			return f, nil
+		}
+		select {
+		case <-ctx.Done():
+			return mirroredFrame{}, ctx.Err()
+		case <-deadline.C:
+			return f, nil
+		case <-wake: // a status or decoded frame arrived; check the same pair of timestamps again
+		}
 	}
-	since := decodedThrough
-	if c.lastInput.After(since) {
-		since = c.lastInput
-	}
-	c.mu.Unlock()
-	c.Fresh(ctx, since, 3*time.Second)
-	if err := ctx.Err(); err != nil {
-		return mirroredFrame{}, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.frame == nil {
-		return mirroredFrame{}, errors.New("mirror disconnected before a frame was available")
-	}
-	return mirroredFrame{Image: c.frame, boardTS: c.captureTS, session: c.links,
-		decodeBehind: !decodedThrough.IsZero() && !c.captured.After(decodedThrough)}, nil
 }
 
 func (s *Server) targetOnScreen(ctx context.Context, c *Conn, req Request) (image.Image, image.Point, error) {
-	frame, err := s.currentFrame(ctx, c)
+	frame, err := s.frameWithin(ctx, c, pointerCatchupWait)
 	if err != nil {
 		return nil, image.Point{}, err
 	}

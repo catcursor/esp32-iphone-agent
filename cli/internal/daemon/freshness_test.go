@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"image"
 	"strings"
 	"testing"
@@ -28,6 +29,53 @@ func TestInputBoundaryIgnoresProbesAndTracksFinalRelease(t *testing.T) {
 	c.noteInput("release", base.Add(time.Hour))
 	if c.lastInput != base.Add(6*time.Second) {
 		t.Fatal("a pointer reset replaced the final drag release time")
+	}
+}
+
+func TestReplayedVideoMustCatchUpToBoardWatermark(t *testing.T) {
+	c := newConn("test", "test", "simulated")
+	img := image.NewRGBA(image.Rect(0, 0, 100, 150))
+	c.via = "wifi"
+	c.onStatus([]byte(`{"ap":"streaming","up":600000,"vage":100}`))
+	// The decoder has already caught up with this computer's most recent AU,
+	// but the board has captured almost seven more minutes of the phone.
+	c.latestVideoTS = 180000
+	c.onFrame(video.Frame{Img: img, TS: 180000})
+	f, err := c.awaitCurrentFrame(t.Context(), time.Millisecond)
+	state := f.freshness(c)
+	if err != nil || state.Status != "unconfirmed" || state.LagMS != 419900 {
+		t.Fatalf("replay unexpectedly current: %+v %v", state, err)
+	}
+	c.onStatus([]byte(`{"up":601000}`))
+	if c.boardVideoTS != 599900 {
+		t.Fatalf("compact status moved the last captured AU: %d", c.boardVideoTS)
+	}
+	// No new capture for seven minutes is valid when the board reports that
+	// same idle edge. Raw wall-clock age must not disqualify the frame.
+	c.onStatus([]byte(`{"ap":"streaming","up":700000,"vage":520000}`))
+	f, err = c.awaitCurrentFrame(t.Context(), time.Millisecond)
+	if err != nil || f.freshness(c).Status != "current" {
+		t.Fatalf("legitimate idle frame: %+v %v", f.freshness(c), err)
+	}
+}
+
+func TestVerificationWaitsWithoutMovingOnBoardReplay(t *testing.T) {
+	s, b := directBoard(t)
+	c, err := s.conn(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.ffmpeg = "simulated"
+	c.mu.Unlock()
+	img := image.NewRGBA(image.Rect(0, 0, 100, 150))
+	c.onStatus([]byte(`{"ap":"streaming","up":600000,"vage":0}`))
+	c.onFrame(video.Frame{Img: img, TS: 180000})
+	before := len(b.Commands)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if _, err = s.preparePointer(ctx, c, firstPosition); err != context.DeadlineExceeded || len(b.Commands) != before {
+		t.Fatalf("verification moved or mistook the replay for an optical failure: %v %v", err, b.Commands[before:])
 	}
 }
 

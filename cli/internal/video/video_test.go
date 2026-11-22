@@ -104,3 +104,43 @@ func TestDecoderOneInOneOut(t *testing.T) {
 		}
 	}
 }
+
+func TestDecoderKeepsTimesOfBufferedGOP(t *testing.T) {
+	ff, err := FFmpeg()
+	if err != nil {
+		t.Skip(err)
+	}
+	file := filepath.Join(t.TempDir(), "replay.h264")
+	gen := exec.Command(ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:size=160x320:rate=5",
+		"-frames:v", "128", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-profile:v", "baseline", "-g", "256",
+		"-x264-params", "aud=1:scenecut=0", "-f", "h264", file)
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Skipf("no libx264: %s", out)
+	}
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aus := splitAUs(raw)
+	times := make(chan uint32, len(aus))
+	d, err := NewDecoder(ff, func(f Frame) { times <- f.TS })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for i, data := range aus {
+		if !d.Write(AU{Flags: Start | End, TS: uint32(1000 + 200*i), Data: data[6:]}) {
+			t.Fatal("unexpected full queue", i)
+		}
+	}
+	for i := range aus {
+		select {
+		case got := <-times:
+			if want := uint32(1000 + 200*i); got != want {
+				t.Fatalf("replayed picture %d has board timestamp %d, want %d", i, got, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing replayed picture", i)
+		}
+	}
+}

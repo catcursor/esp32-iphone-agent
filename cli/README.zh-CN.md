@@ -25,7 +25,7 @@ Windows（PowerShell）：`irm https://raw.githubusercontent.com/catcursor/esp32
 
 Linux x64 版 RapidOCR 要求 glibc 2.38 或更高版本，适用于 Debian 13 及更新版本。Debian 12 自带 glibc 2.36，截图识别可改用本机 Tesseract。运行 `sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim` 即可安装英文和简体中文识别。
 
-`data.ocr.items[]` 的 `text` 是识别文字，`box` 和 `center` 是输出图片上的像素，`tap` 是可直接传给 `io tap X,Y` 的完整镜像坐标。大模型自行选择是否使用文字框，可用周围内容分辨同名文字，或直接看图定位图标。默认按原尺寸截图。缩放时，`width,height` 是输出尺寸，`source_width,source_height` 是完整镜像尺寸。`--output -` 将图片写到标准输出，OCR 元数据写到标准错误。若 `data.freshness.status` 为 `unconfirmed`，本帧仍可查看；待镜像确认上一动作后再取图选点。
+`data.ocr.items[]` 的 `text` 是识别文字，`box` 和 `center` 是输出图片上的像素，`tap` 是可直接传给 `io tap X,Y` 的完整镜像坐标。大模型自行选择是否使用文字框，可用周围内容分辨同名文字，或直接看图定位图标。默认按原尺寸截图。缩放时，`width,height` 是输出尺寸，`source_width,source_height` 是完整镜像尺寸。`--output -` 将图片写到标准输出，OCR 元数据写到标准错误。若 `data.freshness.status` 为 `unconfirmed`，电脑可能正在重连后回放较早的画面，或尚未收到上一动作后的新帧。在同一会话重新截图，等状态为 `current` 后再选点。
 
 每个会话首次执行位置手势前，CLI 会在镜像上核对两个光标位置。可运行 `esp32agent calibrate --verify` 读取已有映射的逐点误差，运行 `esp32agent calibrate` 重新测量。校验需要镜像实时更新且光标可见。蓝牙兼容流程见[原项目协议](../docs/cli-protocol.md)。
 

@@ -9,7 +9,6 @@ import (
 	"image"
 	"io"
 	"os/exec"
-	"sync"
 
 	"golang.org/x/image/bmp"
 )
@@ -26,8 +25,7 @@ type Decoder struct {
 	cmd    *exec.Cmd
 	in     io.WriteCloser
 	queue  chan AU
-	mu     sync.Mutex
-	ts     []uint32 // board times of AUs in flight, oldest first
+	ts     chan uint32 // one timestamp per submitted picture, in decode order
 	stderr bytes.Buffer
 	done   chan struct{}
 	err    error
@@ -51,7 +49,8 @@ func FFmpeg() (string, error) {
 func NewDecoder(ffmpeg string, onFrame func(Frame)) (*Decoder, error) {
 	// Room for a whole GOP (the board's holds up to 8192 AUs): a new stream starts with it at once, and over Wi-Fi it
 	// arrives faster than ffmpeg decodes. 256 overflowed there and the stream waited minutes for the next IDR (2026-11-06).
-	d := &Decoder{queue: make(chan AU, 8192), done: make(chan struct{})}
+	const gopCapacity = 8192
+	d := &Decoder{queue: make(chan AU, gopCapacity), ts: make(chan uint32, gopCapacity), done: make(chan struct{})}
 	d.cmd = exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-flags", "low_delay",
 		"-probesize", "32", "-analyzeduration", "0", "-threads", "1", "-f", "h264", "-i", "pipe:0", "-fps_mode", "passthrough", "-flush_packets", "1", "-f", "image2pipe", "-c:v", "bmp", "pipe:1")
 	d.cmd.Stderr = &d.stderr
@@ -75,9 +74,13 @@ func NewDecoder(ffmpeg string, onFrame func(Frame)) (*Decoder, error) {
 				break
 			}
 			img, err := bmp.Decode(bytes.NewReader(raw))
-			ts := d.popTS()
-			if err == nil {
-				onFrame(Frame{Img: img, TS: ts})
+			select {
+			case ts := <-d.ts:
+				if err == nil {
+					onFrame(Frame{Img: img, TS: ts})
+				}
+			default:
+				// An output picture with no input timestamp cannot establish freshness.
 			}
 		}
 		d.err = d.cmd.Wait()
@@ -89,35 +92,23 @@ func NewDecoder(ffmpeg string, onFrame func(Frame)) (*Decoder, error) {
 	return d, nil
 }
 
-func (d *Decoder) popTS() uint32 {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if len(d.ts) == 0 {
-		return 0
-	}
-	t := d.ts[0]
-	d.ts = d.ts[1:]
-	return t
-}
-
 func (d *Decoder) feed() {
+	defer d.in.Close()
 	for au := range d.queue {
-		if au.Flags&(IDR|Config) == Config {
-			// parameter sets only: no picture comes out of it
-		} else {
-			d.mu.Lock()
-			d.ts = append(d.ts, au.TS)
-			if len(d.ts) > 30 { // a picture ffmpeg dropped would skew every later time; never by much
-				d.ts = d.ts[len(d.ts)-30:]
+		if au.Flags&(IDR|Config) != Config { // parameter sets alone produce no picture
+			// During replay a whole run of small P-frames can reach ffmpeg before
+			// its first picture comes out. Preserve their times and apply backpressure.
+			select {
+			case d.ts <- au.TS:
+			case <-d.done:
+				return
 			}
-			d.mu.Unlock()
 		}
 		// The trailing delimiter ends the AU for ffmpeg's parser, which otherwise holds it until the next one starts.
 		if _, err := d.in.Write(append(au.Data, aud...)); err != nil {
 			break
 		}
 	}
-	d.in.Close()
 }
 
 // Write queues one AU. A full queue means ffmpeg fell far behind; the AU is dropped and false returned.

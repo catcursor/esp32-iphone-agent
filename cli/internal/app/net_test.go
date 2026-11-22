@@ -2,12 +2,15 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
 )
@@ -22,26 +25,38 @@ func TestInteractiveDirectJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	l, err := daemon.Listen(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
 	requests := make(chan daemon.Request, 4)
-	go func() {
+	var server sync.WaitGroup
+	t.Cleanup(func() {
+		l.Close()
+		server.Wait()
+	})
+	server.Go(func() {
 		for {
 			nc, err := l.Accept()
 			if err != nil {
 				return
 			}
-			func(c net.Conn) {
-				defer c.Close()
+			server.Go(func() {
+				defer nc.Close()
+				stop := context.AfterFunc(t.Context(), func() { nc.Close() })
+				defer stop()
+				nc.SetDeadline(time.Now().Add(5 * time.Second))
 				var req daemon.Request
-				if json.NewDecoder(c).Decode(&req) != nil {
+				if json.NewDecoder(nc).Decode(&req) != nil {
 					return // the client's socket liveness check
 				}
-				requests <- req
+				select {
+				case requests <- req:
+				default:
+					t.Error("too many network requests")
+					return
+				}
 				response := daemon.Response{Status: "ok", Data: map[string]any{"via": "wifi"}}
 				switch {
 				case req.Text == "join chosen network\x00private password":
@@ -49,10 +64,16 @@ func TestInteractiveDirectJoin(t *testing.T) {
 				case req.Text != "":
 					response = daemon.Response{Status: "error", Error: "board rejected credentials"}
 				}
-				json.NewEncoder(c).Encode(response)
-			}(nc)
+				json.NewEncoder(nc).Encode(response)
+			})
 		}
-	}()
+	})
+	// A probe that hasn't delivered EOF must not hold up the actual requests.
+	probe, err := net.DialTimeout("unix", daemon.SocketPath(dir), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
 	for _, test := range []struct {
 		password string
 		code     int
@@ -71,6 +92,9 @@ func TestInteractiveDirectJoin(t *testing.T) {
 			Client: &daemon.Client{Dir: dir, NoSpawn: true}}
 		if code := a.Run(args); code != test.code {
 			t.Fatalf("exit code %d, output %s", code, out.String())
+		}
+		if len(requests) != 2 {
+			t.Fatalf("got %d network requests, want 2", len(requests))
 		}
 		if first, join := <-requests, <-requests; first.Text != "" || join.Text != "join chosen network\x00"+test.password {
 			t.Fatal("unexpected network request")
