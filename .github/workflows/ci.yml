@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, release-1.0]
+    branches: [main, release-1.0, sense-usb-lan]
   pull_request:
 
 permissions:
@@ -25,14 +25,14 @@ jobs:
 
   # PRs only run the jobs whose inputs changed. Skipping is done with `if:` (not on.paths) so the
   # required checks `ios` / `firmware` still report "skipped" = success instead of staying pending.
-  # Branch pushes run everything.
+  # The LAN fork ships the board firmware and the CLI (cli.yml).
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      ios: ${{ github.event_name != 'pull_request' || steps.filter.outputs.ios == 'true' }}
+      ios: ${{ (github.event_name != 'pull_request' && github.ref != 'refs/heads/sense-usb-lan') || steps.filter.outputs.ios == 'true' }}
       firmware: ${{ github.event_name != 'pull_request' || steps.filter.outputs.firmware == 'true' }}
-      server: ${{ github.event_name != 'pull_request' || steps.filter.outputs.server == 'true' }}
+      server: ${{ (github.event_name != 'pull_request' && github.ref != 'refs/heads/sense-usb-lan') || steps.filter.outputs.server == 'true' }}
     steps:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
         id: filter
@@ -105,10 +105,15 @@ jobs:
   firmware:
     needs: changes
     if: needs.changes.outputs.firmware == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+      - name: Test firmware code and the AirPlay event exchange on the host
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmbedtls-dev
+          make -C hardware/tests
       - uses: arduino/setup-arduino-cli@v2
       - run: |
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
@@ -116,12 +121,15 @@ jobs:
           arduino-cli lib install "NimBLE-Arduino@2.5.1"
       - name: Build
         run: hardware/flash.sh --build-only
+      - name: Save the LAN firmware image
+        if: github.ref == 'refs/heads/sense-usb-lan'
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiao-esp32s3-sense-firmware
+          path: hardware/build/hid_bridge.ino.bin
+          if-no-files-found: error
       - name: Build (absolute mouse)
         run: hardware/flash.sh --abs --build-only
-      - name: Host tests (bplist, GOP buffer, CLI protocol, Bonjour TXT, …)
-        run: |
-          sudo apt-get install -y libmbedtls-dev
-          make -C hardware/tests
 
   server:  # legacy v0.1.0 architecture, kept working
     needs: changes

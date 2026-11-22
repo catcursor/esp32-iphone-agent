@@ -1,5 +1,5 @@
 // Package daemon holds the BLE sessions: the first CLI command starts `esp32agent daemon`, and every command
-// reaches it over a unix socket in the config dir. It exits after 10 minutes without requests.
+// reaches it over a unix socket in the config dir. A direct LAN session can keep decoding an active mirror while idle.
 package daemon
 
 import (
@@ -54,15 +54,16 @@ func ok(data any) Response    { return Response{Status: "ok", Data: data} }
 func fail(err error) Response { return Response{Status: "error", Error: err.Error()} }
 
 type Server struct {
-	Transport ble.Transport
-	Owner     *owner.Profile // physical USB pairing for the default, direct TCP board
-	Config    *config.Config
-	Dir       string
-	Version   string
-	Idle      time.Duration // exit after this long without requests (0 = never)
-	ScanTime  time.Duration
-	DialWiFi  func(ctx context.Context, ip string) (proto.Link, error) // the board's Wi-Fi link; nil: ble.DialWiFi
-	WiFiCheck time.Duration                                            // how often to try it (0: 2 s)
+	Transport  ble.Transport
+	Owner      *owner.Profile // physical USB pairing for the default, direct TCP board
+	Config     *config.Config
+	Dir        string
+	Version    string
+	Idle       time.Duration // exit after this long without requests (0 = never)
+	KeepMirror bool          // count an active, USB-paired LAN mirror as activity
+	ScanTime   time.Duration
+	DialWiFi   func(ctx context.Context, ip string) (proto.Link, error) // the board's Wi-Fi link; nil: ble.DialWiFi
+	WiFiCheck  time.Duration                                            // how often to try it (0: 2 s)
 
 	mu     sync.Mutex
 	conns  map[string]*Conn
@@ -119,15 +120,31 @@ func (s *Server) idle() {
 			return
 		case <-time.After(10 * time.Second):
 		}
-		s.mu.Lock()
-		quiet := s.active == 0 && time.Since(s.last) > s.Idle
-		s.mu.Unlock()
-		if quiet {
+		if s.idleExpired(time.Now()) {
 			log.Printf("idle for %v, exiting", s.Idle)
 			s.Stop()
 			return
 		}
 	}
+}
+
+func (s *Server) idleExpired(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.KeepMirror && s.Owner != nil {
+		if c := s.conns[idHex(s.Owner.BoardID)]; c != nil {
+			c.mu.Lock()
+			// A still iPhone may send no video for minutes. Board status continues
+			// once a second, so it can distinguish this from a dead TCP connection.
+			streaming := c.sess != nil && c.via == "wifi" && c.status["ap"] == "streaming"
+			lastStatus := c.statusAt
+			c.mu.Unlock()
+			if streaming && lastStatus.After(s.last) {
+				s.last = lastStatus
+			}
+		}
+	}
+	return s.active == 0 && now.Sub(s.last) > s.Idle
 }
 
 func (s *Server) touch(delta int) {

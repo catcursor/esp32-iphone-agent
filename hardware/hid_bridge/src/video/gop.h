@@ -38,6 +38,12 @@ void gop_init(gop_buf *g, uint8_t *arena, size_t cap, gop_au *aus, int max);
 void gop_set_config(gop_buf *g, const uint8_t *annexb, size_t len, uint32_t ts);
 // Appends one Annex-B access unit. Returns its index, or -1 if it was dropped.
 int gop_push(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t ts);
+// A lost reference picture invalidates the whole chain. Only a new IDR can restart it.
+void gop_invalidate(gop_buf *g);
+bool gop_needs_keyframe(const gop_buf *g, bool new_decoder);
+// A frozen prefix can still reach the live edge while its entire tail is retained,
+// or while a decoder continuously following that tail has already consumed the trimmed part.
+bool gop_has_chain(const gop_buf *g, bool tail_live, bool tail_trimmed, bool following_tail);
 // Appends without the IDR rules (a plain AU list, e.g. the AUs after a frozen GOP). -1 if full.
 int gop_append(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t ts);
 // Appends to a plain AU list kept as a ring: when full, drops the oldest (a quarter at a time: each drop moves

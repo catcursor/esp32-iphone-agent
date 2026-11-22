@@ -73,7 +73,7 @@ Linux x64 版 RapidOCR 要求 glibc 2.38 或更高版本，适用于 Debian 13 �
 
 附近有多块板子时，用 `--device <id>`（12 位十六进制 ID，或板子名称里的 4 位十六进制数）指定，或设置 `ESP32AGENT_DEVICE`。输出是 `{"status":"ok","data":...}` 或 `{"status":"error","error":"..."}`（退出码 1）。需要设备端 Agent 的 mobilecli 命令（`apps`、`dump ui`、`fs`、`webview` 等）会返回 `not supported on ESP32 Agent`。
 
-第一个命令会启动后台的 `esp32agent daemon`，由它保持板子会话并解码视频；其他命令通过配置目录里的 unix socket 连接它（日志：同目录下的 `daemon.log`）。空闲 10 分钟后它会自动退出。
+第一个命令会启动后台的 `esp32agent daemon`，由它保持连接并解码画面，日志是配置目录中的 `daemon.log`。默认情况下，只要 USB 配对的板子在局域网上持续报告投屏，后台会保持连接。投屏结束或连接断开后，空闲十分钟才退出。手动指定 `daemon --idle-timeout 时长` 时按指定时长执行。
 
 ## 接入 Agent
 

@@ -196,7 +196,7 @@ static void setup_session(ap_conn *c, bp_reader *r, int top, bp_writer *w, int r
   bp_get_string(r, bp_dict_get(r, top, "name"), name, sizeof name);
   ap_log("setup: session from %s (%s), timing port %u", name, model, (unsigned)port);
   bp_w_set(w, root, "timingPort", bp_w_uint(w, AP_TIMING_PORT));
-  bp_w_set(w, root, "eventPort", bp_w_uint(w, 0));
+  bp_w_set(w, root, "eventPort", bp_w_uint(w, ap_events_open(c)));
 }
 
 static void handle_setup(ap_conn *c, const ap_req *req, ap_resp *res) {
@@ -296,6 +296,7 @@ static void handle_teardown(ap_conn *c, const ap_req *req, ap_resp *res) {
   ap_resp_header(res, "Connection", "close");
   if ((video || !any) && ap_mirror_owner == c) {  // iOS >= 17 may send no stream list when mirroring stops
     ap_mirror_stop();
+    ap_events_close(c);
     ap_mirror_owner = NULL;
   }
   ap_log("teardown (%s)", video ? "video" : any ? "audio" : "session");

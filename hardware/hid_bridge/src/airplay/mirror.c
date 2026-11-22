@@ -264,9 +264,15 @@ static void handle_packet(const uint8_t *hdr, uint8_t *p, size_t n) {
   last = k;
   m.bad = 0;
   m.held_set = false;
-  if (m.held_ready && ap_cfg.on_au) ap_cfg.on_au(m.held, m.held_n, annexb_has_idr(m.held, m.held_n));
+  if (m.held_ready && ap_cfg.on_au) {
+    bool idr = annexb_has_idr(m.held, m.held_n);
+    ap_events_frame(idr);
+    ap_cfg.on_au(m.held, m.held_n, idr);
+  }
   m.held_ready = false;
-  if (ap_cfg.on_au) ap_cfg.on_au(p, n, annexb_has_idr(p, n));
+  bool idr = annexb_has_idr(p, n);
+  ap_events_frame(idr);
+  if (ap_cfg.on_au) ap_cfg.on_au(p, n, idr);
 }
 
 static void send_ntp(uint8_t req[32]) {
@@ -303,6 +309,7 @@ static void mirror_task(void *arg) {
   uint8_t *payload = NULL;
   size_t got = 0, need = 128, cap = 0;
   bool in_payload = false;
+  bool had_connection = false;
   int64_t next_ntp = 0;
   while (m.run) {
     // Heartbeats keep the session "streaming" while no video comes: a still screen, or a stalled sender.
@@ -339,11 +346,18 @@ static void mirror_task(void *arg) {
       struct sockaddr_in peer;
       socklen_t pl = sizeof peer;
       m.sfd = accept(m.lfd, (struct sockaddr *)&peer, &pl);
-      if (m.sfd >= 0 && ap_cfg.allow_peer && !ap_cfg.allow_peer(peer.sin_addr.s_addr)) {
+      if (m.sfd >= 0 && (peer.sin_addr.s_addr != m.remote_ip || (ap_cfg.allow_peer && !ap_cfg.allow_peer(peer.sin_addr.s_addr)))) {
         ap_log("mirror: data connection from %s refused (not this board's phone)", inet_ntoa(peer.sin_addr));
         close(m.sfd);
         m.sfd = -1;
         continue;
+      }
+      if (m.sfd >= 0) {
+        if (had_connection) {
+          ap_events_stream_reset();
+          if (ap_cfg.on_video_reset) ap_cfg.on_video_reset();
+        }
+        had_connection = true;
       }
       got = 0, need = 128, in_payload = false;
       m.got_codec = false;
@@ -411,6 +425,8 @@ static void derive(const char *label, uint64_t id, const uint8_t aeskey[16], uin
 bool ap_mirror_start(const uint8_t aeskey[16], uint64_t stream_id, uint32_t remote_ip, uint16_t timing_rport) {
   uint8_t key[16];
   ap_mirror_stop();
+  ap_events_stream_reset();
+  if (ap_cfg.on_video_reset) ap_cfg.on_video_reset();
   derive("AirPlayStreamKey", stream_id, aeskey, key);
   derive("AirPlayStreamIV", stream_id, aeskey, m.iv0);
   memset(m.ks, 0, sizeof m.ks);

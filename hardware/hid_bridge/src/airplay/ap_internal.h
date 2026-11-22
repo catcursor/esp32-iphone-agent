@@ -86,6 +86,7 @@ typedef struct {
 
 typedef struct {
   int fd;
+  struct ap_events *events;  // reverse RTSP connection negotiated by this SETUP
   uint32_t remote_ip;  // network byte order
   uint8_t *buf;
   size_t len, cap;
@@ -97,6 +98,13 @@ typedef struct {
   uint8_t eiv[16];     // SETUP eiv: the audio stream's AES-CBC IV
   uint16_t timing_rport;
 } ap_conn;
+
+uint16_t ap_events_open(ap_conn *c);
+void ap_events_close(ap_conn *c);
+int ap_events_fd(const ap_conn *c);
+void ap_events_poll(ap_conn *c, bool readable, uint32_t now_ms);
+void ap_events_stream_reset(void);
+void ap_events_frame(bool idr);
 
 extern ap_conn *ap_mirror_owner;  // connection whose SETUP started the mirror stream
 

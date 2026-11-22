@@ -42,6 +42,7 @@ type Conn struct {
 
 	re             *video.Reassembler
 	dec            *video.Decoder
+	decoderGen     uint64 // callbacks from a closed FFmpeg process must not update a new session
 	ffmpeg         string
 	frame          image.Image
 	frameHash      uint64
@@ -115,10 +116,8 @@ func (c *Conn) attach(s *proto.Session, via string, l proto.Link) error {
 		c.captured, c.updated, c.changed = time.Time{}, time.Time{}, time.Time{}
 		c.status, c.statusAt = map[string]any{}, time.Time{}
 	}
-	if c.dec != nil { // the new stream starts over from the GOP
-		c.dec.Close()
-		c.dec = nil
-	}
+	c.closeDecoder() // the new stream starts over from the GOP
+	c.signalFrameWaiters()
 	c.mu.Unlock() // pending commands stay: the board sends their replies on the new session
 	if old != nil && oldVia == "wifi" {
 		old.Close()
@@ -156,10 +155,8 @@ func (c *Conn) detach(s *proto.Session, why error) {
 		close(ch)
 		delete(c.pending, id)
 	}
-	if c.dec != nil {
-		c.dec.Close()
-		c.dec = nil
-	}
+	c.closeDecoder()
+	c.signalFrameWaiters()
 	log.Printf("%s: session ended: %v", c.ID, why)
 }
 
@@ -356,10 +353,7 @@ func (c *Conn) onStatus(b []byte) {
 	if c.status["ap"] != "streaming" {
 		c.haveBoardVideo = false
 	}
-	if c.wake != nil {
-		close(c.wake)
-		c.wake = make(chan struct{})
-	}
+	c.signalFrameWaiters()
 }
 
 // learnClock must hold mu.
@@ -406,7 +400,8 @@ func (c *Conn) onVideo(chunk []byte, gap bool) {
 		}
 	}
 	if c.dec == nil && c.ffmpeg != "" && au.Flags&(video.Config|video.IDR) != 0 {
-		d, err := video.NewDecoder(c.ffmpeg, c.onFrame)
+		generation := c.decoderGen
+		d, err := video.NewDecoder(c.ffmpeg, func(f video.Frame) { c.decodedFrame(generation, f) })
 		if err != nil {
 			log.Printf("%s: decoder: %v", c.ID, err)
 			c.ffmpeg = ""
@@ -419,8 +414,7 @@ func (c *Conn) onVideo(chunk []byte, gap bool) {
 	}
 	if c.dec != nil && !c.dec.Write(*au) {
 		log.Printf("%s: decoder fell behind or stopped (%v); restarting at the next IDR", c.ID, c.dec.Err())
-		c.dec.Close()
-		c.dec = nil
+		c.closeDecoder()
 		c.re.Lost()
 	}
 }
@@ -433,11 +427,30 @@ func hashImage(img image.Image) uint64 {
 	return h.Sum64()
 }
 
-func (c *Conn) onFrame(f video.Frame) {
+// Both helpers run with mu held.
+func (c *Conn) closeDecoder() {
+	if c.dec != nil {
+		c.dec.Close()
+		c.dec = nil
+		c.decoderGen++
+	}
+}
+
+func (c *Conn) signalFrameWaiters() {
+	if c.wake != nil {
+		close(c.wake)
+		c.wake = make(chan struct{})
+	}
+}
+
+func (c *Conn) decodedFrame(generation uint64, f video.Frame) {
 	now := time.Now()
 	hash := hashImage(f.Img)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if generation != c.decoderGen {
+		return
+	}
 	c.updated = now
 	c.captured = now
 	c.captureTS = f.TS
@@ -457,8 +470,7 @@ func (c *Conn) onFrame(f video.Frame) {
 		default:
 		}
 	}
-	close(c.wake)
-	c.wake = make(chan struct{})
+	c.signalFrameWaiters()
 }
 
 // Status returns a copy of the merged status and its age.

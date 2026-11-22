@@ -17,6 +17,7 @@ import (
 
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/pointer"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/proto"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/textloc"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/video"
 	"golang.org/x/image/draw"
@@ -41,17 +42,48 @@ func (c *Conn) waitForStatus(ctx context.Context) error {
 	return nil
 }
 
+// The receiver requests a new H.264 keyframe when its replay buffer fills.
+// Older firmware does not advertise that recovery and needs an explicit restart.
+func (c *Conn) waitForMirror(ctx context.Context, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	link := c.Links()
+	for {
+		c.mu.Lock()
+		disconnected := c.links != link || (link != 0 && c.sess == nil)
+		streaming := c.status["ap"] == "streaming"
+		frozen, recovering := num(c.status["fz"]) == 1, num(c.status["kfr"]) == 1
+		wake := c.wake
+		c.mu.Unlock()
+		switch {
+		case disconnected:
+			return proto.ErrSession
+		case !streaming:
+			return errMirroring
+		case !frozen:
+			return nil
+		case !recovering:
+			return errFrozen
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("the receiver is waiting for a new mirroring keyframe; keep Screen Mirroring connected and retry")
+		case <-wake:
+		}
+	}
+}
+
+const keyframeWait = 8 * time.Second
+
 // videoState explains why there is no usable screen, nil when mirroring streams.
 func (s *Server) videoState(ctx context.Context, c *Conn) error {
 	if err := c.waitForStatus(ctx); err != nil {
 		return err
 	}
-	st, _ := c.Status()
-	if num(st["fz"]) == 1 {
-		return errFrozen
-	}
-	if st["ap"] != "streaming" {
-		return errMirroring
+	if err := c.waitForMirror(ctx, keyframeWait); err != nil {
+		return err
 	}
 	c.mu.Lock()
 	ff := c.ffmpeg
@@ -92,8 +124,8 @@ func (s *Server) frame(ctx context.Context, c *Conn) (image.Image, error) {
 	c.mu.Lock()
 	c.lastShot = time.Now()
 	c.mu.Unlock()
-	if st, _ := c.Status(); num(st["fz"]) == 1 {
-		return nil, errFrozen
+	if err := c.waitForMirror(ctx, keyframeWait); err != nil {
+		return nil, err
 	}
 	return c.Frame(), nil
 }

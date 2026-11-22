@@ -9,8 +9,8 @@
 #include "logbuf.h"
 
 // GOP since the latest IDR. A still screen gets an IDR only every few minutes (iOS 26: maybe once per mirroring
-// session), so room for ~27 min of AUs at 5 fps (P-frames of a still screen are tiny). When it fills, it freezes
-// (gop.h): a stream that is in step goes on from the tail below, everyone else needs the next IDR (status fz).
+// session), so request a fresh IDR before the byte or AU limit. If the sender takes longer, the tail ring keeps
+// forwarding P-frames. A new decoder can join while the whole chain from its IDR is still available.
 #ifndef GOP_CAP_KB
 #define GOP_CAP_KB 4096  // flash.sh --small-gop: 256, to test a frozen GOP within minutes
 #endif
@@ -127,12 +127,16 @@ static bool copyAu(Sink &s, uint32_t gen, int i, gop_au *au) {
   return ok;
 }
 
-// Copies tail AU i into the sink's scratch; false if there is none (yet) or the tail broke off.
-static bool copyTail(Sink &s, uint32_t gen, int i, gop_au *au) {
+// Advance the live cursor under the same lock that moves it when the tail discards old AUs.
+// A snap has a private cursor and must retry if trimming changed its indices.
+static bool copyTail(Sink &s, uint32_t gen, int &next, bool snap, gop_au *au) {
   xSemaphoreTake(lock, portMAX_DELAY);
-  bool ok = gop.gen == gen && tailLive && s.onTail && i < tail.n && tail.aus[i].len <= SCRATCH_CAP;
+  // The prefix may have grown and then frozen while the task was sending its earlier snapshot.
+  // Send the remaining prefix in the next streamStep before crossing into the tail.
+  bool can_read = snap ? !tailTrimmed : (s.onTail && s.next >= gop.n);
+  bool ok = gop.gen == gen && tailLive && can_read && next < tail.n && tail.aus[next].len <= SCRATCH_CAP;
   if (ok) {
-    *au = tail.aus[i];
+    *au = tail.aus[next++];
     memcpy(s.scratch, tail.arena + au->off, au->len);
   }
   xSemaphoreGive(lock);
@@ -163,24 +167,35 @@ static uint32_t lastWhyAt, tailBreaks;
 
 // The sink fell out of order: its frozen GOP can't go on, the next IDR has to come.
 static void unfollow(Sink &s, char why) {
+  xSemaphoreTake(lock, portMAX_DELAY);
   if (s.followGen != UINT32_MAX) lastWhy = why, lastWhyAt = millis();
   s.followGen = UINT32_MAX;
   s.onTail = false;
   s.resumed = false;
+  xSemaphoreGive(lock);
 }
 
-// Snapshot of the GOP state: generation, AU count, SPS/PPS. A frozen GOP counts as none (it may end minutes
-// ago), except for a stream that goes on from the tail.
-static bool snapshot(uint32_t *gen, int *n, uint8_t *cfg, size_t *cfg_len, uint32_t *cfg_ts, const Sink *following) {
+// Snapshot of the decodable chain. A trimmed tail only works for a receiver already following it.
+static bool snapshot(uint32_t *gen, int *n, uint8_t *cfg, size_t *cfg_len, uint32_t *cfg_ts, Sink *following,
+                     int *tail_count = NULL) {
   xSemaphoreTake(lock, portMAX_DELAY);
   *gen = gop.gen;
-  if (gop.frozen && !(following && tailLive && following->onTail && following->followGen == gop.gen)) {
+  bool joining = !following || following->txGen != gop.gen;
+  bool follows_tail = following && following->followGen == gop.gen && following->onTail;
+  if (joining && lastAu && gop_needs_keyframe(&gop, true)) airplay_request_keyframe();
+  if (!gop_has_chain(&gop, tailLive, tailTrimmed, follows_tail)) {
     *n = 0;
     *cfg_len = 0;
     xSemaphoreGive(lock);
     return false;
   }
-  *n = gop.wait_idr ? 0 : gop.n;
+  *n = gop.n;
+  if (tail_count) *tail_count = gop.frozen ? tail.n : 0;
+  if (following && joining && gop.cfg_len) {
+    following->followGen = gop.gen;
+    following->onTail = gop.frozen;
+    following->tailNext = 0;
+  }
   *cfg_len = gop.cfg_len;
   *cfg_ts = gop.cfg_ts;
   memcpy(cfg, gop.cfg, gop.cfg_len);
@@ -194,9 +209,9 @@ static String doSnap(Sink &s) {
   for (int attempt = 0; attempt < 3; attempt++) {
     uint32_t gen, cfg_ts;
     size_t cfg_len;
-    int n;
-    if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts, NULL)) {
-      if (frozenNow()) return "err video frozen (restart screen mirroring)";
+    int n, tail_count;
+    if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts, NULL, &tail_count)) {
+      if (frozenNow()) return "err video frozen (waiting for a fresh keyframe)";
       // wait_idr is true from boot; only surface the keyframe wait once mirroring is actually up.
       if (waitingIdrNow() && airplay_state() == AIRPLAY_STREAMING) return "err waiting for keyframe";
       return "err no video (start screen mirroring)";
@@ -207,6 +222,11 @@ static String doSnap(Sink &s) {
       gop_au au;
       complete = copyAu(s, gen, i, &au);
       if (complete && !sendAu(s, s.scratch, au.len, VF_SNAP | (au.idr ? VF_IDR : 0), au.ts)) return "err video send failed";
+    }
+    for (int i = 0; i < tail_count && complete;) {
+      gop_au au;
+      complete = copyTail(s, gen, i, true, &au);
+      if (complete && !sendAu(s, s.scratch, au.len, VF_SNAP, au.ts)) return "err video send failed";
     }
     if (complete) return "ok";  // else a new IDR replaced the GOP mid-send: start over with it
   }
@@ -291,16 +311,15 @@ static void streamStep(Sink &s) {
   if (!snapshot(&gen, &n, cfg, &cfg_len, &cfg_ts, &s)) return;
   if (gen != s.txGen) {
     s.txGen = gen;
-    s.next = s.tailNext = 0;
+    s.next = 0;
     s.catchingUp = true;
     if (!sendAu(s, cfg, cfg_len, VF_CONFIG, cfg_ts)) { s.txGen = UINT32_MAX; unfollow(s, 'c'); return; }
-    s.followGen = gen;
   }
   for (gop_au au; s.next < n && copyAu(s, gen, s.next, &au); s.next++)
     if (!sendAu(s, s.scratch, au.len, (au.idr ? VF_IDR : 0) | resumeFlag(s), au.ts)) { s.txGen = UINT32_MAX; unfollow(s, 'g'); return; }
   if (s.next < n) return;
   s.catchingUp = false;
-  for (gop_au au; copyTail(s, gen, s.tailNext, &au); s.tailNext++)
+  for (gop_au au; copyTail(s, gen, s.tailNext, false, &au);)
     if (!sendAu(s, s.scratch, au.len, resumeFlag(s), au.ts)) { s.txGen = UINT32_MAX; unfollow(s, 't'); return; }
 }
 
@@ -334,8 +353,31 @@ bool video_begin() {
   return true;
 }
 
+// Called with lock held. The parameter sets are retained until fresh ones arrive.
+static void clearChain() {
+  gop_invalidate(&gop);
+  gop_clear(&tail);
+  tailLive = tailTrimmed = sink.onTail = false;
+  sink.tailNext = 0;
+}
+
+void video_on_reset() {
+  xSemaphoreTake(lock, portMAX_DELAY);
+  clearChain();
+  gop.frozen = false;  // normal initial wait for the first IDR of the new session
+  gop.cfg_len = gop.cfg_ts = 0;
+  lastAu = lastIdr = statIdrMs = statKbps = winBytes = winFrames = 0;
+  statFps = 0;
+  winStart = millis();
+  xSemaphoreGive(lock);
+}
+
 void video_on_config(const uint8_t *sps_pps, size_t len) {
   xSemaphoreTake(lock, portMAX_DELAY);
+  if (gop.cfg_len && (len != gop.cfg_len || memcmp(sps_pps, gop.cfg, len))) {
+    clearChain();  // a different SPS/PPS cannot be replayed with the previous IDR
+    airplay_request_keyframe();
+  }
   gop_set_config(&gop, sps_pps, len, millis());
   xSemaphoreGive(lock);
 }
@@ -355,6 +397,10 @@ void video_on_au(const uint8_t *au, size_t len, bool idr) {
     statAt = now;
     winBytes = winFrames = 0;
     winStart = now;
+  }
+  if (len > SCRATCH_CAP) {
+    video_on_lost();  // a receiver cannot consume this AU, even if it fits in PSRAM
+    return;
   }
   xSemaphoreTake(lock, portMAX_DELAY);
   bool wasFrozen = gop.frozen, wasLive = tailLive;
@@ -391,6 +437,7 @@ void video_on_au(const uint8_t *au, size_t len, bool idr) {
   bool tailBroke = gop.frozen && !froze && wasLive && !tailLive;
   int aus = gop.n;
   uint32_t kb = gop.used / 1024;
+  if (gop_needs_keyframe(&gop, false)) airplay_request_keyframe();
   xSemaphoreGive(lock);
   if (froze) board_log("video: GOP full (%d AUs, %lu KB); the streams in step go on from the tail\n", aus,
                            (unsigned long)kb);
@@ -400,7 +447,13 @@ void video_on_au(const uint8_t *au, size_t len, bool idr) {
 }
 
 static volatile uint32_t lostPackets;
-void video_on_lost() { lostPackets++; }
+void video_on_lost() {
+  xSemaphoreTake(lock, portMAX_DELAY);
+  lostPackets++;
+  clearChain();
+  airplay_request_keyframe();
+  xSemaphoreGive(lock);
+}
 
 void video_stream(bool on, char who) { sink.streaming[sideOf(who)] = on; }
 
@@ -417,7 +470,9 @@ VideoStats video_stats(char who) {
   bool fresh = millis() - statAt < 3000;  // mirroring stopped: report zeros, not stale numbers
   xSemaphoreTake(lock, portMAX_DELAY);
   uint32_t gopBytes = gop.used, overflows = gop.overflows;
-  bool frozen = gop.frozen && !(tailLive && sink.who == who && sink.onTail);
+  bool following = sink.who == who && sink.followGen == gop.gen && sink.onTail &&
+                   (who != FROM_CLI || sink.cliGen == cli_gen());
+  bool frozen = gop.frozen && !gop_has_chain(&gop, tailLive, tailTrimmed, following);
   xSemaphoreGive(lock);
   uint32_t age = lastAu ? millis() - lastAu : 0;
   return {fresh ? statKbps : 0, statIdrMs, gopBytes, age, fresh ? statFps : 0, overflows, frozen, lostPackets};

@@ -163,6 +163,34 @@ static void test_gop(void) {
   CHECK(gop_push(&g, big, sizeof big + 1, true, 16) == -1 && g.wait_idr && g.n == 0);
   CHECK(gop_push(&g, au, 5, false, 17) == -1 && g.n == 0);
   CHECK(gop_push(&g, au, 5, true, 18) == 0 && !g.wait_idr && g.n == 1);
+
+  // A late keyframe can arrive after the main GOP fills. Preserve the complete chain
+  // for cold subscribers until the first tail AU is evicted; existing decoders may continue.
+  gop_init(&g, arena, 100, aus, 4);
+  CHECK(!gop_has_chain(&g, true, false, false) && gop_needs_keyframe(&g, false));
+  CHECK(gop_push(&g, au, 25, true, UINT32_MAX - 1000) == 0);
+  CHECK(!gop_needs_keyframe(&g, true));  // a static, one-frame GOP has no replay cost
+  CHECK(gop_push(&g, au, 25, false, 18000) == 1);
+  CHECK(gop_needs_keyframe(&g, true) && !gop_needs_keyframe(&g, false));  // reconnect, wrapped clock
+  CHECK(gop_push(&g, au, 25, false, 18001) == 2 && gop_needs_keyframe(&g, false));
+  CHECK(gop_push(&g, au, 25, false, 18002) == 3);
+  CHECK(gop_push(&g, au, 1, false, 18003) == -1 && g.frozen);
+  CHECK(gop_has_chain(&g, true, false, false));  // prefix plus an untrimmed tail is complete
+  CHECK(!gop_has_chain(&g, true, true, false) && gop_has_chain(&g, true, true, true));
+  CHECK(!gop_has_chain(&g, false, false, true));  // even a follower needs an intact tail
+  gen = g.gen;
+  gop_invalidate(&g);
+  CHECK(g.gen != gen && !gop_has_chain(&g, true, false, true));
+  CHECK(gop_push(&g, au, 12, false, 18004) < 0 && g.n == 0);
+  CHECK(gop_push(&g, au, 12, true, 18005) == 0 && g.aus[0].idr &&
+        gop_has_chain(&g, false, true, false) && !gop_needs_keyframe(&g, true));
+
+  gop_init(&g, arena, 100, aus, 4);  // byte pressure before the descriptor limit
+  CHECK(gop_push(&g, au, 40, true, 1) == 0 && !gop_needs_keyframe(&g, false));
+  CHECK(gop_push(&g, au, 35, false, 2) == 1 && gop_needs_keyframe(&g, false));
+  gop_init(&g, big, sizeof big, aus, 4);  // descriptor pressure with ample bytes remaining
+  for (int i = 0; i < 3; i++) CHECK(gop_push(&g, au, 1, i == 0, (uint32_t)i) == i);
+  CHECK(gop_needs_keyframe(&g, false));
 }
 
 static void test_chunker(void) {
@@ -611,7 +639,10 @@ static void test_lan_lock(void) {
   lan_set_station(false);
 }
 
+void test_event_channel(void);
+
 int main(void) {
+  test_event_channel();
   test_lan_lock();
   test_heard();
   test_audio_packets();

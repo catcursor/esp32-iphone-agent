@@ -57,7 +57,7 @@ After a task succeeded, save it so the next run is faster:
 ## Errors to act on
 - `busy: the app is using the phone`: the iOS app is driving right now. Wait and retry later; don't fight it.
 - `screen mirroring is off`: ask the user to start Screen Mirroring to ESP32 Agent.
-- `video frozen`: ask the user to stop and restart Screen Mirroring.
+- When the board reports `ap=streaming`, `fz=1` and `kfr=1`, keep the same connection while the board requests a fresh keyframe. Capture again and check that freshness is current. Restart Screen Mirroring if recovery is unavailable or the sender continues to withhold a keyframe.
 - `not paired`: connect the board to the computer and use `esp32agent pair-usb PORT`.
 - `phone usb asleep`: the phone is locked; ask the user to unlock it.
 - `not supported on ESP32 Agent`: there is no app list, UI tree, file access or webview; work from screenshots.

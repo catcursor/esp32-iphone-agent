@@ -150,7 +150,7 @@ func (a *App) Run(args []string) int {
 	case "version":
 		return a.print(daemon.Response{Status: "ok", Data: map[string]string{"version": Version}})
 	case "daemon":
-		idle := fs.Duration("idle-timeout", 10*time.Minute, "exit after this long without requests (0: never)")
+		idle := fs.Duration("idle-timeout", 10*time.Minute, "exit after this long without requests, even while mirroring (0: never)")
 		pos, err := parse(fs, rest)
 		if err != nil {
 			return a.fail(err)
@@ -158,7 +158,13 @@ func (a *App) Run(args []string) int {
 		if len(pos) > 0 && pos[0] == "stop" {
 			return a.call(daemon.Request{Cmd: "stop"})
 		}
-		return a.daemon(*idle)
+		keepMirror := true
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "idle-timeout" {
+				keepMirror = false
+			}
+		})
+		return a.daemon(*idle, keepMirror)
 	case "mcp":
 		return a.mcp(os.Stdin)
 	case "history":
@@ -409,7 +415,7 @@ func screenshotPath(out, device, format string) (string, error) {
 	}
 }
 
-func (a *App) daemon(idle time.Duration) int {
+func (a *App) daemon(idle time.Duration, keepMirror bool) int {
 	cfg, err := config.Load()
 	if err != nil {
 		return a.fail(err)
@@ -427,7 +433,8 @@ func (a *App) daemon(idle time.Duration) int {
 	}
 	log.SetFlags(log.LstdFlags)
 	log.Printf("esp32agent %s daemon on %s", Version, daemon.SocketPath(a.Dir))
-	s := &daemon.Server{Transport: ble.Default(), Owner: profile, Config: cfg, Dir: a.Dir, Version: Version, Idle: idle}
+	s := &daemon.Server{Transport: ble.Default(), Owner: profile, Config: cfg, Dir: a.Dir, Version: Version,
+		Idle: idle, KeepMirror: keepMirror && profile != nil}
 	if err := s.Serve(l); err != nil {
 		log.Print(err)
 		return 1

@@ -22,6 +22,7 @@ description: 通过 USB 配对过的 ESP32 在局域网控制真实 iPhone、获
 
 ## 配对、网络与拍照
 
+- 镜像停住时用 `esp32agent device info` 区分连接和画面。`ap=streaming`、`fz=1`、`kfr=1` 时，板子可向手机请求新关键帧。保持当前会话，待恢复后重新截图，确认 `data.freshness.status=current` 再操作。`ap` 已停止时请用户开启镜像。发送端不支持自动恢复或持续等不到关键帧时，再请用户重新开始镜像。
 - 部署电脑端时用 `esp32agent ocr install` 从固定版本的 [RapidOCR-CLI 发布包](https://github.com/AwesomeDog/RapidOCR-CLI/releases/tag/v0.1.0)下载并校验运行时和模型。之后每次截图用本地文件识别，无需为无文字界面另配一个定位模型。
 - 将板子用 USB 接电脑，执行 `esp32agent pair-usb PORT` 完成首次配对。Windows 串口形如 `COM3`，macOS 形如 `/dev/cu.usbmodem…`，Linux 形如 `/dev/ttyACM0`。日常使用时板子接 iPhone，iPhone 将屏幕镜像投到 ESP32 Agent，电脑能经局域网访问板子。
 - 用 `esp32agent net` 查连接，`esp32agent net ipv4` 查地址策略，`esp32agent net join` 配 Wi-Fi，`esp32agent net static <IPv4>` 或 `esp32agent net dhcp` 修改地址策略。局域网中断时接 USB，用 `esp32agent usb PORT wifi status` 查看实际地址，或 `esp32agent usb PORT wifi join <SSID>` 更换网络。在本机提示中输入密码。板子换地址后用 `esp32agent target <地址>` 更新目标，再用 `esp32agent device info` 核对身份。

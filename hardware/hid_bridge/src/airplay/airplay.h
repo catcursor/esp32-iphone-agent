@@ -34,6 +34,8 @@ typedef struct {
   // H.264 out, Annex-B. Called from the mirror task; the data is only valid during the call.
   void (*on_config)(const uint8_t *sps_pps, size_t len);
   void (*on_au)(const uint8_t *au, size_t len, bool idr);
+  // A new source/data stream cannot continue the preceding H.264 chain, even if its SPS/PPS match.
+  void (*on_video_reset)(void);
   // Decrypted AAC-ELD frames (44.1 kHz stereo, 480 samples each), only while there is sound; ts is the RTP
   // timestamp. Called from the mirror task: copy the data, don't block. Optional.
   void (*on_audio)(int event, const uint8_t *frame, size_t len, uint32_t ts);
@@ -49,6 +51,9 @@ typedef struct {
 // Advertises over mDNS and starts the RTSP server task. Call once Wi-Fi is up (any mode).
 bool airplay_start(const airplay_cfg *cfg);
 int airplay_state(void);  // AIRPLAY_IDLE / _CONNECTED / _STREAMING
+// Request an independent H.264 picture from the mirroring source. Safe from the video callback.
+void airplay_request_keyframe(void);
+bool airplay_keyframe_supported(void);
 // The board joined a home network without a restart: advertise over mDNS again (a new responder). The one set up for
 // the hotspot was not found there (2026-11-17). Going back to the hotspot restarts the board instead (netcfg.cpp).
 void airplay_readvertise(void);

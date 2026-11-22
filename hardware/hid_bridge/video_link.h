@@ -4,6 +4,7 @@
 #include <Arduino.h>
 
 bool video_begin();
+void video_on_reset();  // forget frames and codec parameters belonging to the previous mirroring session
 void video_on_config(const uint8_t *sps_pps, size_t len);  // AirPlay callbacks (mirror task)
 void video_on_au(const uint8_t *au, size_t len, bool idr);
 void video_on_lost();  // AirPlay dropped a video packet for good (status "lost")

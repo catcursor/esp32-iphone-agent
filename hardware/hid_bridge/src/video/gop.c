@@ -24,6 +24,24 @@ static void restart(gop_buf *g) {
   g->gen++;
 }
 
+void gop_invalidate(gop_buf *g) {
+  restart(g);
+  g->wait_idr = true;
+  g->frozen = true;
+}
+
+bool gop_needs_keyframe(const gop_buf *g, bool new_decoder) {
+  if (g->wait_idr || g->frozen) return true;
+  // Leave space for the sender's response between requesting a keyframe and receiving it.
+  if (g->used >= g->cap - g->cap / 4 || g->n >= g->max - g->max / 4) return true;
+  // An old but completely still screen costs just one picture to replay.
+  return new_decoder && g->n > 1 && g->aus[g->n - 1].ts - g->aus[0].ts >= 15000;
+}
+
+bool gop_has_chain(const gop_buf *g, bool tail_live, bool tail_trimmed, bool following_tail) {
+  return !g->wait_idr && g->n != 0 && (!g->frozen || (tail_live && (!tail_trimmed || following_tail)));
+}
+
 int gop_append(gop_buf *g, const uint8_t *annexb, size_t len, bool idr, uint32_t ts) {
   if (g->used + len > g->cap || g->n == g->max) return -1;
   memcpy(g->arena + g->used, annexb, len);

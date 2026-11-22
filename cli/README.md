@@ -77,7 +77,10 @@ mobilecli commands that need an on-device agent (`apps`, `dump ui`, `fs`, `webvi
 `not supported on ESP32 Agent`.
 
 The first command starts a background `esp32agent daemon` that holds the board connection and decodes video;
-commands reach it over a unix socket in the config dir (log: `daemon.log` there). It exits after 10 minutes idle.
+commands reach it over a Unix socket in the config directory. Its log is `daemon.log` there.
+The default daemon stays connected while a USB-paired board reports active mirroring over the LAN.
+Once mirroring or the link stops, ten minutes of inactivity closes the daemon. An explicit
+`daemon --idle-timeout DURATION` keeps the specified timeout policy.
 
 ## Agents
 

@@ -37,6 +37,40 @@ func directBoard(t *testing.T) (*Server, *proto.FakeBoard) {
 	return s, b
 }
 
+func TestIdleDuringDirectMirror(t *testing.T) {
+	const timeout = 10 * time.Minute
+	start := time.Now()
+	id := []byte{0, 1, 2, 3, 4, 5}
+	c := newConn(idHex(id), "board", "")
+	c.sess, c.via = &proto.Session{}, "wifi"
+	s := &Server{Owner: &owner.Profile{BoardID: id}, Idle: timeout, KeepMirror: true, last: start,
+		conns: map[string]*Conn{c.ID: c}}
+	// Two hours without a CLI command or a new picture, but current status
+	// still reports an active mirror. Keep the same decoder and session.
+	now := start.Add(2 * time.Hour)
+	c.status["ap"], c.statusAt = "streaming", now
+	if s.idleExpired(now) || !s.last.Equal(now) {
+		t.Fatal("expired an active direct mirror")
+	}
+	c.status["ap"] = "idle"
+	if s.idleExpired(now.Add(timeout-time.Second)) || !s.idleExpired(now.Add(timeout+time.Second)) {
+		t.Fatal("idle expiry did not restart after mirroring stopped")
+	}
+	// A hung socket with stale status cannot extend the deadline.
+	c.status["ap"] = "streaming"
+	if !s.idleExpired(now.Add(timeout + time.Second)) {
+		t.Fatal("stale streaming status kept the daemon alive")
+	}
+	s.last, s.KeepMirror = start, false // explicit --idle-timeout
+	if !s.idleExpired(now) {
+		t.Fatal("mirror overrode an explicit idle timeout")
+	}
+	s.active = 1
+	if s.idleExpired(now) {
+		t.Fatal("expired during an in-flight request")
+	}
+}
+
 func TestDirectSessionReconnectAndSelection(t *testing.T) {
 	s, b := directBoard(t)
 	if r := s.Do(t.Context(), Request{Cmd: "devices"}); r.Status != "ok" || len(s.conns) != 0 {
