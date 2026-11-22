@@ -41,7 +41,7 @@ Copy-Item -Recurse -Force ./skills/iphone-lan $skills
 
 部署时在电脑运行 `esp32agent ocr install`，从外部仓库下载并校验固定版本的 [RapidOCR-CLI 运行时与识别模型](https://github.com/AwesomeDog/RapidOCR-CLI/releases/tag/v0.1.0)。每次执行 `screenshot`，它都会就地识别这一帧，将图片路径和 OCR 结果一起返回。模型可以读取 `data.ocr.items`，按周围文字选中正确的一行；定位图标或开关时也可以直接看图片。
 
-`box` 和 `center` 使用输出图片像素，每项的 `tap.x`、`tap.y` 使用完整镜像像素，可直接传给 `esp32agent io tap X,Y`。默认输出为原尺寸。缩放时保留 `source_width` 和 `source_height`，便于把自行选取的图像点还原。
+每项的 `box` 是文字框，`center` 是框的中心。点按文字时，直接把 `tap.x`、`tap.y` 传给 `esp32agent io tap X,Y`。
 
 每个控制会话首次实际点按、长按或滑动之前，CLI 会移动辅助触控光标，将镜像中的两个实测落点与预期坐标比对。如果映射不合格，程序会尝试重新校准，仍无法验证则停止该手势。`esp32agent calibrate --verify` 可主动查看逐点误差，适合在静止、光标可见的页面执行。
 

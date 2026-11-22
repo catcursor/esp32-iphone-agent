@@ -35,7 +35,7 @@ const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board.
   usb PORT wifi join SSID [--password-stdin] | hotspot | static IPv4 | dhcp
   devices                          show the USB-paired board, or discover nearby Bluetooth boards
   pair | unpair                    manage legacy Bluetooth pairing
-  screenshot [--format png|jpeg] [--quality N] [--scale F] [--max-size N] [--output PATH|-]
+  screenshot [--format png|jpeg] [--quality N] [--output PATH|-]
                                    OCR and geometry in JSON; with --output -, image on stdout and JSON on stderr
   io tap X,Y [--aim] [--count N]   full-screen pixels (use OCR item's tap point); --count 2 double-taps
   io tap-text LABEL [--locate] [--aim]   find a unique visible text label on the full screen

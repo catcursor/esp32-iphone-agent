@@ -25,7 +25,7 @@ Enable AssistiveTouch and mirror the iPhone screen to ESP32 Agent. Run `esp32age
 
 The Linux x64 RapidOCR build requires glibc 2.38 or later, available on Debian 13 and newer. On Debian 12 (glibc 2.36), screenshot OCR can use the host's Tesseract. Install English and Simplified Chinese recognition with `sudo apt install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim`.
 
-Each item in `data.ocr.items[]` has its recognized `text`, a `box` and `center` in output-image pixels and a `tap` point ready for `io tap X,Y` in full-screen pixels. The agent can distinguish repeated labels by context or use the image directly for icons. The default image is full size. On resized output, `width,height` describe the saved image and `source_width,source_height` the original frame. With `--output -`, stdout contains the image and stderr carries the OCR metadata. A freshness status of `unconfirmed` means the client is replaying buffered video or waiting for a frame after the latest input. Keep the session open and capture again before choosing another point.
+Each item in `data.ocr.items[]` includes the recognized `text`, bounding `box`, `center` and a `tap` point ready for `io tap X,Y`. The agent can distinguish repeated labels by context or use the image directly for icons. With `--output -`, stdout contains the image and stderr carries the OCR metadata. A freshness status of `unconfirmed` means the client is replaying buffered video or waiting for a frame after the latest input. Keep the session open and capture again before choosing another point.
 
 Before the first positional gesture of a session the CLI checks the pointer against two locations on the mirrored screen. Run `esp32agent calibrate --verify` for per-point error on the saved mapping. Run `esp32agent calibrate` to remeasure. Both require a live mirrored screen and a visible pointer. The [upstream protocol](../docs/cli-protocol.md) documents Bluetooth compatibility.
 
@@ -35,7 +35,7 @@ Before the first positional gesture of a session the CLI checks the pointer agai
 |---|---|
 | `devices` | boards nearby (`id`, `paired`, `connected`) |
 | `pair`, `unpair` | pair this computer; forget the board here |
-| `screenshot [--format png\|jpeg] [--quality N] [--scale F] [--max-size N] [--output PATH\|DIR/\|-]` | the screen after the last action settled; default a file in the current directory |
+| `screenshot [--format png\|jpeg] [--quality N] [--output PATH\|DIR/\|-]` | the screen after the last action settled; default a file in the current directory |
 | `io tap X,Y [--aim] [--count N]` | coordinates are pixels of a full-size screenshot; `--count 2` double-taps |
 | `io tap-text "LABEL" [--locate] [--aim]` | find a unique matching label on the live screen with local OCR and tap its center.  |
 | `io tap-grid X,Y --step N [--locate] [--aim]` | tap a point in graph units on an axis-aligned, evenly spaced light grid with visible darker zero axes (right/up). Read the step from the tick labels. Use `--step NX,NY` for different horizontal and vertical units per cell. |

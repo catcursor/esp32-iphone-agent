@@ -86,7 +86,7 @@ Every command prints JSON: `{"status":"ok","data":...}` or `{"status":"error","e
 |---|---|
 | `devices` | Boards nearby (`id`, `paired`, `connected`) |
 | `pair`, `unpair` | Pair this computer with the board; forget it here |
-| `screenshot [--format png\|jpeg] [--quality N] [--scale F] [--max-size N] [--output PATH\|DIR/\|-]` | Save the screen; prints `filePath` |
+| `screenshot [--format png\|jpeg] [--quality N] [--output PATH\|DIR/\|-]` | Save the screen; prints `filePath` |
 | `io tap X,Y [--aim] [--count N]` | Tap; `--aim` finds the pointer and corrects before tapping |
 | `io longpress X,Y [--duration MS]` | Press and hold |
 | `io swipe X1,Y1,X2,Y2` | Swipe |
@@ -108,8 +108,7 @@ With several boards nearby pass `--device <id>` or set `ESP32AGENT_DEVICE`.
 1. Take a screenshot (`screenshot` tool, or `esp32agent screenshot` and read the PNG at `filePath`).
    It waits until the screen has settled after your last action.
 2. Decide one action from what you see.
-3. Do that one action, with coordinates in pixels of that full-size screenshot. If you used `--scale` or
-   `--max-size`, convert the coordinates back to full size.
+3. Perform the action using pixel coordinates from the screenshot.
 4. Take another screenshot and check the result before the next step. Never chain several taps blind.
 
 Tips:
