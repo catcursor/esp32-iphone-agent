@@ -2,7 +2,7 @@
 // Pointer.swift (itself a port of phone.py).
 //
 // The pointer is relative, so we track where it is (in mouse units) and move from there; every few gestures it
-// is slammed into the top-left corner (`home`) again to cancel drift. Coordinates are fractions of the screen
+// is referenced against the straight edges again to cancel drift. Coordinates are fractions of the screen
 // (0..1, origin top-left), so they work for any frame size.
 package pointer
 
@@ -21,7 +21,8 @@ import (
 
 const (
 	CalibrationMove = 200                    // mouse units moved diagonally for a one-point calibration
-	RehomeEvery     = 10                     // gestures between re-homing
+	CalibrationY    = 600                    // vertical travel for measuring the left-edge reference
+	ReferenceEvery  = 10                     // gestures between edge references
 	Hold            = 250 * time.Millisecond // rest before lifting, so iOS adds no momentum
 	TapGap          = 150 * time.Millisecond // stay still after a click, so iOS sees a finished tap
 	Nudge           = 12                     // mouse units the pointer is wiggled by to find it on screen
@@ -33,9 +34,6 @@ const (
 	// frame often took over a second: calibration with 1 s saw no pointer (2026-11-06).
 	FreshWait = 3 * time.Second
 )
-
-// CalibrationStops are the distances at which calibration finds the pointer.
-var CalibrationStops = []int{150, 350}
 
 // Device sends one board command; an "err" reply is an error. Links counts (re)connections.
 type Device interface {
@@ -56,25 +54,35 @@ type Screen interface {
 type Span struct{ W, H int }
 
 type saved struct {
-	W       int                    `json:"w"`
-	H       int                    `json:"h"`
-	Seen    map[string][][]float64 `json:"seen,omitempty"`
-	Quality *float64               `json:"quality,omitempty"`
-	Aspect  *float64               `json:"aspect,omitempty"`
-	Moves   string                 `json:"moves,omitempty"` // "axis": measured with moveXY's moves; older ones are redone
+	StrokeOffset [2]float64             `json:"stroke_offset_units"`
+	W            int                    `json:"w"`
+	H            int                    `json:"h"`
+	Seen         map[string][][]float64 `json:"seen,omitempty"`
+	Quality      *float64               `json:"quality,omitempty"`
+	Aspect       *float64               `json:"aspect,omitempty"`
+	Moves        string                 `json:"moves,omitempty"` // "axis": measured with moveXY's moves; older ones are redone
 }
 
 // MovesAxis marks a calibration measured with axis-by-axis moves.
-const MovesAxis = "axis"
+const MovesAxis = "edges-segment-fit-v1"
+
+type StrokeSample struct {
+	Units  int     `json:"total_units"`
+	Single float64 `json:"single_px"`
+	Five   float64 `json:"five_px"`
+	Offset float64 `json:"offset_px"`
+}
 
 type Pointer struct {
-	dev    Device
-	screen Screen
-	file   string
-	Span   *Span // mouse units needed to cross the full screen width / height
-	pos    *[2]int
-	moves  int
-	link   int
+	StrokeSamples [2]StrokeSample
+	dev           Device
+	screen        Screen
+	file          string
+	Span          *Span // mouse units needed to cross the full screen width / height
+	pos           *[2]float64
+	strokeOffset  [2]float64 // extra travel per stroke, expressed in equivalent mouse units
+	moves         int
+	link          int
 	// where the pointer really landed (seen on screen) for the fraction aimed at, per axis; a line fit through
 	// them corrects every later move, so taps get better as the agent works
 	seen    map[string][][2]float64
@@ -105,6 +113,7 @@ func New(dev Device, screen Screen, file string) *Pointer {
 		return p
 	}
 	p.Span = &Span{s.W, s.H}
+	p.strokeOffset = s.StrokeOffset
 	p.Quality, p.Aspect = s.Quality, s.Aspect
 	for _, axis := range []string{"x", "y"} {
 		for _, v := range s.Seen[axis] {
@@ -154,69 +163,153 @@ var ErrNotFound = errors.New("calibration: pointer not found on screen (is the m
 // new mouse calibration cannot fix a mirror that has not shown the move yet.
 var ErrProbeFrame = errors.New("no fresh mirrored frame for pointer verification")
 
-// Calibrate finds the pointer on screen at two known distances from the corner and fits the mapping from both.
-func (p *Pointer) Calibrate(ctx context.Context) error {
-	p.pos = nil
-	if err := p.send(ctx, "home"); err != nil {
+// referenceLeft ends at mouse coordinates (0, yUnits). Finding the
+// top with X inside the screen keeps rounded corners out of the measurement.
+func (p *Pointer) referenceLeft(ctx context.Context, yUnits int) error {
+	if err := p.referenceTop(ctx); err != nil {
 		return err
 	}
-	type stop struct {
-		units int
-		x, y  float64
+	if err := p.rawStroke(ctx, 0, yUnits); err != nil {
+		return err
 	}
-	var found []stop
-	for _, units := range CalibrationStops {
-		step := units
-		if len(found) > 0 {
-			step = units - found[len(found)-1].units
-		}
-		if err := p.moveXY(ctx, step, step); err != nil {
-			return err
-		}
-		if p.screen == nil || !p.screen.Live() {
-			break
-		}
-		pt, ok, err := p.findPointer(ctx)
-		if err == nil && !ok { // once more: a frame lost or a late one
-			pt, ok, err = p.findPointer(ctx)
-		}
-		if err != nil {
-			return err
-		}
-		if !ok {
-			break
-		}
-		found = append(found, stop{units, pt.X, pt.Y})
+	if err := p.edgeStroke(ctx, -5000, 0); err != nil {
+		return err
 	}
-	if len(found) < 2 {
-		return ErrNotFound
-	}
-	a, b := found[0], found[1]
-	if b.x == a.x || b.y == a.y {
-		return ErrNotFound
-	}
-	s := Span{int(math.RoundToEven(float64(b.units-a.units) / (b.x - a.x))), int(math.RoundToEven(float64(b.units-a.units) / (b.y - a.y)))}
-	// Two sightings of one spot (a stale frame) give a huge span, and the check move after it then took the board
-	// 20 s: its watchdog reset it (2026-11-06). A real span is a few hundred to a few thousand units.
-	if s.W < 100 || s.H < 100 || s.W > 5000 || s.H > 5000 {
-		return ErrNotFound
-	}
-	p.Span = &s
-	aspect := p.screenAspect()
-	p.Quality, p.Aspect = nil, &aspect
-	p.seen = map[string][][2]float64{"x": nil, "y": nil}
-	for _, f := range found { // where each stop landed, so moves are corrected for the offset too
-		p.remember("x", [2]float64{float64(f.units) / float64(s.W), f.x})
-		p.remember("y", [2]float64{float64(f.units) / float64(s.H), f.y})
-	}
-	p.Log(fmt.Sprintf("calibration: span %d x %d", s.W, s.H))
-	return p.save()
+	p.pos, p.moves = &[2]float64{0, float64(yUnits) + p.strokeOffset[1]}, 0
+	return nil
 }
 
-// findPointer wiggles the pointer and finds it anywhere on screen (the span may still be unknown).
-func (p *Pointer) findPointer(ctx context.Context) (Point, bool, error) {
-	pt, ok, err := p.observe(ctx, Nudge, 0.025, Point{0.5, 0.5}, Point{0.5, 0.5})
-	return pt, ok && pt.X > 0.03 && pt.X < 0.97 && pt.Y > 0.03 && pt.Y < 0.97, err
+func (p *Pointer) referenceTop(ctx context.Context) error {
+	p.Forget()
+	if err := p.edgeStroke(ctx, -5000, 0); err != nil {
+		return err
+	}
+	if err := p.rawStroke(ctx, CalibrationMove, 0); err != nil {
+		return err
+	}
+	return p.edgeStroke(ctx, 0, -5000)
+}
+
+func (p *Pointer) edgeStroke(ctx context.Context, x, y int) error {
+	if err := p.send(ctx, "move %d %d 40", x, y); err != nil {
+		return err
+	}
+	return p.Sleep(ctx, Hold)
+}
+
+func (p *Pointer) rawStroke(ctx context.Context, x, y int) error {
+	if err := p.send(ctx, "move %d %d", x, y); err != nil {
+		return err
+	}
+	return p.Sleep(ctx, Hold)
+}
+
+func (p *Pointer) edgeFrame(ctx context.Context, since time.Time) image.Image {
+	if p.screen.Fresh(ctx, since, FreshWait) == nil {
+		return nil
+	}
+	p.screen.Settled(ctx, 400*time.Millisecond, 800*time.Millisecond, 3*time.Second)
+	return p.screen.Frame()
+}
+
+// sampleEdges measures the same pair of straight-edge positions with either
+// one raw stroke per axis or five, resetting the physical origin each time.
+func (p *Pointer) sampleEdges(ctx context.Context, xUnits, yUnits, parts int) (Point, Point, error) {
+	var zero Point
+	if err := p.referenceTop(ctx); err != nil {
+		return zero, zero, err
+	}
+	for i := 0; i < parts; i++ {
+		if err := p.rawStroke(ctx, 0, yUnits/parts); err != nil {
+			return zero, zero, err
+		}
+	}
+	since := time.Now()
+	if err := p.edgeStroke(ctx, -5000, 0); err != nil {
+		return zero, zero, err
+	}
+	left := p.edgeFrame(ctx, since)
+	if left == nil {
+		return zero, zero, ErrProbeFrame
+	}
+	for i := 0; i < parts; i++ {
+		if err := p.rawStroke(ctx, xUnits/parts, 0); err != nil {
+			return zero, zero, err
+		}
+	}
+	since = time.Now()
+	if err := p.edgeStroke(ctx, 0, -5000); err != nil {
+		return zero, zero, err
+	}
+	top := p.edgeFrame(ctx, since)
+	if top == nil || left.Bounds() != top.Bounds() {
+		return zero, zero, ErrProbeFrame
+	}
+	a, b := ToGray(left), ToGray(top)
+	l, okL := edgeCenter(a, b, false)
+	t, okT := edgeCenter(b, a, true)
+	if !okL || !okT || t.X <= l.X || l.Y <= t.Y {
+		return zero, zero, ErrNotFound
+	}
+	return l, t, nil
+}
+
+// For a distance d sent in n equal strokes: travel = gain*d + n*offset.
+// Both samples are normalised to the screen size before fitting.
+func fitStrokes(units int, one, five float64) (span int, offset float64, err error) {
+	extra := (five - one) / 4
+	gain := (one - extra) / float64(units)
+	if gain < 1./5000 || gain > 1./100 || math.Abs(extra) >= gain*float64(units)/5 {
+		return 0, 0, ErrNotFound
+	}
+	return int(math.Round(1 / gain)), extra / gain, nil
+}
+
+func (p *Pointer) Calibrate(ctx context.Context) error {
+	if p.screen == nil || !p.screen.Live() {
+		return ErrNotFound
+	}
+	defer p.Forget()
+	// Shorten the horizontal stroke on screens where 400 reaches the corner.
+	var l, t, l5, t5 Point
+	var err error
+	var xUnits int
+	for _, xUnits = range []int{400, CalibrationMove} {
+		l, t, err = p.sampleEdges(ctx, xUnits, CalibrationY, 1)
+		if err == nil {
+			l5, t5, err = p.sampleEdges(ctx, xUnits, CalibrationY, 5)
+		}
+		if !errors.Is(err, ErrNotFound) {
+			break
+		}
+	}
+	if err != nil {
+		return err
+	}
+	w, bx, err := fitStrokes(xUnits, t.X-l.X, t5.X-l5.X)
+	if err != nil {
+		return err
+	}
+	h, by, err := fitStrokes(CalibrationY, l.Y-t.Y, l5.Y-t5.Y)
+	if err != nil {
+		return err
+	}
+	frame := p.screen.Frame()
+	if frame == nil {
+		return ErrProbeFrame
+	}
+	sz := frame.Bounds().Size()
+	sample := func(units int, one, five float64, pixels int) StrokeSample {
+		return StrokeSample{Units: units, Single: one * float64(pixels), Five: five * float64(pixels), Offset: (five - one) * float64(pixels) / 4}
+	}
+	p.StrokeSamples = [2]StrokeSample{sample(xUnits, t.X-l.X, t5.X-l5.X, sz.X), sample(CalibrationY, l.Y-t.Y, l5.Y-t5.Y, sz.Y)}
+	aspect := p.screenAspect()
+	p.Span, p.Aspect, p.Quality = &Span{w, h}, &aspect, nil
+	p.strokeOffset = [2]float64{bx, by}
+	// Fix handles the physical position of the straight edge. The per-stroke
+	// offset belongs to each relative command, not to the absolute target.
+	p.seen = map[string][][2]float64{"x": {{0, l.X}, {1, 1 + l.X}}, "y": {{0, t.Y}, {1, 1 + t.Y}}}
+	return p.save()
 }
 
 // Observe the outward nudge and its return. The return frame distinguishes the
@@ -276,7 +369,7 @@ func (p *Pointer) save() error {
 	if p.Span == nil || p.file == "" {
 		return nil
 	}
-	s := saved{W: p.Span.W, H: p.Span.H, Seen: map[string][][]float64{}, Quality: p.Quality, Aspect: p.Aspect, Moves: MovesAxis}
+	s := saved{StrokeOffset: p.strokeOffset, W: p.Span.W, H: p.Span.H, Seen: map[string][][]float64{}, Quality: p.Quality, Aspect: p.Aspect, Moves: MovesAxis}
 	for axis, pts := range p.seen {
 		s.Seen[axis] = [][]float64{}
 		for _, v := range pts {
@@ -330,11 +423,12 @@ func (p *Pointer) aim(ctx context.Context, x, y float64) error {
 	}
 	mx := int(math.RoundToEven((x - found.X) * float64(p.Span.W)))
 	my := int(math.RoundToEven((y - found.Y) * float64(p.Span.H)))
-	if err := p.moveXY(ctx, mx, my); err != nil { // fix this miss right away
+	moved, err := p.moveCalibrated(ctx, float64(mx), float64(my))
+	if err != nil { // fix this miss right away
 		return err
 	}
 	if p.pos != nil {
-		p.pos = &[2]int{p.pos[0] + mx, p.pos[1] + my}
+		p.pos = &[2]float64{p.pos[0] + moved[0], p.pos[1] + moved[1]}
 	}
 	found, ok, err = p.measure(ctx, x, y)
 	if err != nil {
@@ -358,8 +452,25 @@ func (p *Pointer) measure(ctx context.Context, x, y float64) (Point, bool, error
 	if x >= 0.9 { // stay clear of the screen edge
 		nudge = -Nudge
 	}
+	p.screen.Settled(ctx, 150*time.Millisecond, 100*time.Millisecond, 600*time.Millisecond) // pointer at rest
+	before, sent := p.screen.Frame(), time.Now()
+	if err := p.send(ctx, "move %d 0", nudge); err != nil {
+		return Point{}, false, err
+	}
+	after := p.screen.Fresh(ctx, sent, 1200*time.Millisecond)
+	if after != nil {
+		p.screen.Settled(ctx, 100*time.Millisecond, 50*time.Millisecond, 400*time.Millisecond)
+		after = p.screen.Frame()
+	}
+	if err := p.send(ctx, "move %d 0", -nudge); err != nil {
+		return Point{}, false, err
+	}
 	shift := float64(nudge) / float64(p.Span.W)
-	return p.observe(ctx, nudge, shift, Point{x, y}, Point{0.12, 0.08})
+	if pt, ok := Locate(before, after, Point{x, y}, shift, Point{0.12, 0.08}); ok {
+		return pt, true, nil
+	}
+	pt, ok := Locate(before, after, Point{0.5, 0.5}, shift, Point{0.5, 0.5})
+	return pt, ok, nil
 }
 
 // Drift is how far the learned correction has moved targets away from the plain calibration.
@@ -398,10 +509,7 @@ func (p *Pointer) Fix(t float64, axis string) float64 {
 		a = 1
 	}
 	b := mf - a*mc
-	if math.Abs(b) < 0.1 {
-		return (t - b) / a
-	}
-	return t
+	return (t - b) / a
 }
 
 func (p *Pointer) moveTo(ctx context.Context, tx, ty int, rehome bool) error {
@@ -411,19 +519,42 @@ func (p *Pointer) moveTo(ctx context.Context, tx, ty int, rehome bool) error {
 		}
 		p.pos, p.link = nil, l
 	}
-	if p.pos == nil || rehome && p.moves >= RehomeEvery {
-		if err := p.send(ctx, "home"); err != nil {
+	if p.pos == nil || rehome && p.moves >= ReferenceEvery {
+		if err := p.referenceLeft(ctx, CalibrationMove); err != nil {
 			return err
 		}
-		p.pos, p.moves = &[2]int{0, 0}, 0
 	}
 	x, y := p.pos[0], p.pos[1]
 	p.pos = nil // unknown until the move succeeds
-	if err := p.moveXY(ctx, tx-x, ty-y); err != nil {
+	moved, err := p.moveCalibrated(ctx, float64(tx)-x, float64(ty)-y)
+	if err != nil {
 		return err
 	}
-	p.pos, p.moves = &[2]int{tx, ty}, p.moves+1
+	p.pos, p.moves = &[2]float64{x + moved[0], y + moved[1]}, p.moves+1
 	return nil
+}
+
+// Choose the nearest reachable displacement, including the option of staying
+// still for tiny deltas. Track what was sent so rounding cannot accumulate.
+func strokeCommand(delta, offset float64) (int, float64) {
+	if delta == 0 {
+		return 0, 0
+	}
+	units := max(1, int(math.Round(math.Abs(delta)-offset)))
+	travel := float64(units) + offset
+	if travel <= 0 || math.Abs(travel-math.Abs(delta)) >= math.Abs(delta) {
+		return 0, 0
+	}
+	if delta < 0 {
+		return -units, -travel
+	}
+	return units, travel
+}
+
+func (p *Pointer) moveCalibrated(ctx context.Context, dx, dy float64) ([2]float64, error) {
+	x, sx := strokeCommand(dx, p.strokeOffset[0])
+	y, sy := strokeCommand(dy, p.strokeOffset[1])
+	return [2]float64{sx, sy}, p.moveXY(ctx, x, y)
 }
 
 // moveXY moves the pointer along x, then along y. The board paces a move in reports of at most 10 units per axis,
@@ -448,11 +579,7 @@ func (p *Pointer) Reset(ctx context.Context) error {
 	if err := p.send(ctx, "release"); err != nil {
 		return err
 	}
-	if err := p.send(ctx, "home"); err != nil {
-		return err
-	}
-	p.pos, p.moves = &[2]int{0, 0}, 0
-	return nil
+	return p.referenceLeft(ctx, CalibrationMove)
 }
 
 // Tap clicks count times (at least once) at x, y without moving in between: 2 is a double tap.

@@ -27,14 +27,17 @@ The Linux x64 RapidOCR build requires glibc 2.38 or later, available on Debian 1
 
 Each item in `data.ocr.items[]` includes the recognized `text`, bounding `box`, `center` and a `tap` point ready for `io tap X,Y`. The agent can distinguish repeated labels by context or use the image directly for icons. With `--output -`, stdout contains the image and stderr carries the OCR metadata. A freshness status of `unconfirmed` means the client is replaying buffered video or waiting for a frame after the latest input. Keep the session open and capture again before choosing another point.
 
-Before the first positional gesture of a session the CLI checks the pointer against two locations on the mirrored screen. Run `esp32agent calibrate --verify` for per-point error on the saved mapping. Run `esp32agent calibrate` to remeasure. Both require a live mirrored screen and a visible pointer. The [upstream protocol](../docs/cli-protocol.md) documents Bluetooth compatibility.
+Run `esp32agent calibrate` on a still portrait screen at setup and whenever you move the board to another iPhone. The command compares one move with five moves over the same distance on each axis. It saves the mapping under the board ID on this computer and returns `data.span` and `data.strokes`. Each axis reports the commanded distance in mouse units, the two measured distances in pixels and the offset in pixels per additional move. The CLI applies the correction automatically.
+
+The first positional gesture of a session checks two pointer locations. A change in frame dimensions triggers another check. Run `esp32agent calibrate --verify` to inspect the requested and observed positions and errors. Both commands need live mirroring and a visible pointer.
 
 ## Commands
 
 | Command | |
 |---|---|
-| `devices` | boards nearby (`id`, `paired`, `connected`) |
-| `pair`, `unpair` | pair this computer; forget the board here |
+| `devices` | show the USB-paired board or discover nearby Bluetooth boards |
+| `pair-usb PORT`, `target HOST` | pair over USB and save the board address, or update its LAN address |
+| `pair`, `unpair` | manage legacy Bluetooth pairing |
 | `screenshot [--format png\|jpeg] [--quality N] [--output PATH\|DIR/\|-]` | the screen after the last action settled; default a file in the current directory |
 | `io tap X,Y [--aim] [--count N]` | coordinates are pixels of a full-size screenshot; `--count 2` double-taps |
 | `io tap-text "LABEL" [--locate] [--aim]` | find a unique matching label on the live screen with local OCR and tap its center.  |
@@ -46,9 +49,10 @@ Before the first positional gesture of a session the CLI checks the pointer agai
 | `io button HOME` | the only button |
 | `screencapture --format h264\|mjpeg` | live video to stdout, e.g. `\| ffplay -` |
 | `device info` | board status: `ap` (mirroring), `fz` (video frozen), `busy` (the app holds the phone), `usb`, `ble` |
-| `calibrate [--verify]` | measure and verify the pointer, or check its saved mapping |
-| `net` | the CLI's link (`via`: `ble` or `wifi`) and the board's Wi-Fi. With this computer on the board's network (same Wi-Fi, or its hotspot) commands and video go over Wi-Fi; BLE stays as the way back |
-| `net join` | asks for your Wi-Fi's name and password (not echoed), sends them to the board over the Bluetooth session, and waits until the link moves to Wi-Fi. `net join SSID [PASSWORD]` does it without asking. The iPhone mirrors over that Wi-Fi too |
+| `calibrate [--verify]` | measure and save the four-point mapping, or verify the saved mapping |
+| `net` | inspect the current transport and board Wi-Fi |
+| `net join` | enter the SSID and password over the authenticated connection |
+| `net ipv4`, `net static IPv4`, `net dhcp` | inspect or set the address policy for this network |
 | `net hotspot` | the board opens its own hotspot again |
 | `net via auto\|ble` | `ble` keeps the session on BLE (also `ESP32AGENT_TRANSPORT=ble`) |
 | `listen` | what the iPhone played in the last 30 s (a video, a call, an app's voice) as words, or why it can't be heard |

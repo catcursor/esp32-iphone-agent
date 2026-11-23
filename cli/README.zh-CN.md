@@ -27,14 +27,17 @@ Linux x64 版 RapidOCR 要求 glibc 2.38 或更高版本，适用于 Debian 13 �
 
 每个 `data.ocr.items[]` 都包含识别文字 `text`、文字框 `box`、中心点 `center` 和可直接传给 `io tap X,Y` 的点按坐标 `tap`。大模型自行选择是否使用文字框，可用周围内容分辨同名文字，或直接看图定位图标。`--output -` 将图片写到标准输出，OCR 元数据写到标准错误。若 `data.freshness.status` 为 `unconfirmed`，电脑可能正在重连后回放较早的画面，或尚未收到上一动作后的新帧。在同一会话重新截图，等状态为 `current` 后再选点。
 
-每个会话首次执行位置手势前，CLI 会在镜像上核对两个光标位置。可运行 `esp32agent calibrate --verify` 读取已有映射的逐点误差，运行 `esp32agent calibrate` 重新测量。校验需要镜像实时更新且光标可见。蓝牙兼容流程见[原项目协议](../docs/cli-protocol.md)。
+首次使用或同一块板换接另一部 iPhone 时，在静止的竖屏页面运行 `esp32agent calibrate`。它在每个轴上分别测量同一距离一次移动和分五次移动的落点，按板子 ID 在电脑保存映射，并返回 `data.span` 和 `data.strokes`。每个轴列出指令距离（鼠标单位）、两次实测距离（像素）和每多发一次移动的偏差（像素）。程序会在发送移动时自动补偿。
+
+会话首次执行位置手势前会核对两个落点，画面尺寸改变后重新核对。若需查看逐点的目标、实测位置及误差，运行 `esp32agent calibrate --verify`。两条命令都需要实时镜像和可见的光标。
 
 ## 命令
 
 | 命令 | |
 |---|---|
-| `devices` | 附近的板子（`id`、`paired`、`connected`） |
-| `pair`、`unpair` | 配对这台电脑；在这台电脑上忘掉板子 |
+| `devices` | 查看通过 USB 配对的板子，或发现附近的蓝牙板子 |
+| `pair-usb PORT`、`target HOST` | 通过 USB 配对并保存板子地址，或更新其局域网地址 |
+| `pair`、`unpair` | 管理旧版蓝牙配对 |
 | `screenshot [--format png\|jpeg] [--quality N] [--output PATH\|DIR/\|-]` | 上一个操作结束、画面稳定后的屏幕；默认保存到当前目录 |
 | `io tap X,Y [--aim] [--count N]` | 坐标是原尺寸截图的像素；`--count 2` 双击 |
 | `io tap-text "文字" [--locate] [--aim]` | 用本地 OCR 找到屏幕上唯一匹配的文字并点其中心。 |
@@ -46,9 +49,10 @@ Linux x64 版 RapidOCR 要求 glibc 2.38 或更高版本，适用于 Debian 13 �
 | `io button HOME` | 唯一的按键 |
 | `screencapture --format h264\|mjpeg` | 实时视频输出到 stdout，例如 `\| ffplay -` |
 | `device info` | 板子状态：`ap`（镜像中）、`fz`（画面冻结）、`busy`（App 正在使用手机）、`usb`、`ble` |
-| `calibrate [--verify]` | 测量并验证光标映射，或仅检查已有映射 |
-| `net` | CLI 当前的通道（`via`：`ble` 或 `wifi`）和板子的 Wi-Fi。电脑和板子在同一个网络（同一个 Wi-Fi，或电脑连着板子热点）时，命令和画面走 Wi-Fi，蓝牙作为备用通道 |
-| `net join` | 询问 Wi-Fi 名称和密码（密码不回显），通过蓝牙会话发给板子，并等到通道切到 Wi-Fi。`net join SSID [PASSWORD]` 不询问直接设置。iPhone 也通过这个 Wi-Fi 镜像 |
+| `calibrate [--verify]` | 四点测量并保存光标映射，或单独校验已有映射 |
+| `net` | 查看当前连接通道和板子的 Wi-Fi |
+| `net join` | 在已认证的连接中输入 Wi-Fi 名称和密码 |
+| `net ipv4`、`net static IPv4`、`net dhcp` | 查看或设置当前网络的 IP 地址策略 |
 | `net hotspot` | 让板子重新打开自己的热点 |
 | `net via auto\|ble` | `ble` 让会话保持走蓝牙（也可以设 `ESP32AGENT_TRANSPORT=ble`） |
 | `listen` | 手机最近 30 秒播放的声音（视频、通话、App 语音）转成的文字；听不到时说明原因 |

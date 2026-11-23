@@ -209,7 +209,6 @@ type calibrationMode int
 const (
 	firstPosition calibrationMode = iota
 	verifyCalibration
-	newCalibration
 )
 
 func (c *Conn) pointerChecked() bool {
@@ -237,7 +236,7 @@ func (s *Server) preparePointer(ctx context.Context, c *Conn, mode calibrationMo
 	link := c.Links()
 	p := c.pointer(s.Dir)
 	var report pointer.Verification
-	if mode == newCalibration || mode == firstPosition && !p.Calibrated() {
+	if mode == firstPosition && !p.Calibrated() {
 		report, err = p.Recalibrate(ctx)
 	} else {
 		report, err = p.CheckAccuracy(ctx)
@@ -265,8 +264,8 @@ func (s *Server) preparePointer(ctx context.Context, c *Conn, mode calibrationMo
 	return &report, nil
 }
 
-func (s *Server) calibrate(ctx context.Context, c *Conn, mode calibrationMode) Response {
-	report, err := s.preparePointer(ctx, c, mode)
+func (s *Server) verifyCalibration(ctx context.Context, c *Conn) Response {
+	report, err := s.preparePointer(ctx, c, verifyCalibration)
 	if err != nil {
 		r := fail(err)
 		if report != nil && report.Width > 0 {
@@ -275,6 +274,25 @@ func (s *Server) calibrate(ctx context.Context, c *Conn, mode calibrationMode) R
 		return r
 	}
 	return ok(report)
+}
+
+func (s *Server) calibrate(ctx context.Context, c *Conn) Response {
+	if err := s.videoState(ctx, c); err != nil {
+		return fail(err)
+	}
+	if _, err := s.frame(ctx, c); err != nil {
+		return fail(err)
+	}
+	p := c.pointer(s.Dir)
+	if err := p.Calibrate(ctx); err != nil {
+		return fail(err)
+	}
+	out := map[string]any{"span": map[string]int{"w": p.Span.W, "h": p.Span.H}, "strokes": map[string]pointer.StrokeSample{"x": p.StrokeSamples[0], "y": p.StrokeSamples[1]}}
+	c.mu.Lock()
+	c.lastInput = time.Now()
+	c.checkedSize = image.Point{}
+	c.mu.Unlock()
+	return ok(out)
 }
 
 // textChunk keeps one `type` line well inside a single BLE write.

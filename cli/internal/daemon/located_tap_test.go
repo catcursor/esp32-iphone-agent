@@ -115,6 +115,29 @@ func TestTargetChangedWhenSmallLabelDisappears(t *testing.T) {
 	}
 }
 
+func TestCalibrationEndsAtLastMeasuredEdge(t *testing.T) {
+	s, board := directBoard(t)
+	c, err := s.conn(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointerMirror(c, board, image.NewRGBA(image.Rect(0, 0, 320, 640)), image.Pt(540, 1200))
+	r := s.Do(t.Context(), Request{Cmd: "calibrate"})
+	data, ok := r.Data.(map[string]any)
+	if r.Status != "ok" || !ok || data["span"] == nil || data["strokes"] == nil || data["error"] != nil {
+		t.Fatal(r)
+	}
+	var moves []string
+	for _, cmd := range board.Commands {
+		if strings.HasPrefix(cmd, "move ") {
+			moves = append(moves, cmd)
+		}
+	}
+	if len(moves) == 0 || moves[len(moves)-1] != "move 0 -5000 40" {
+		t.Fatal("unexpected movement after the last calibration sample", moves)
+	}
+}
+
 func TestExplicitPointerVerificationReusedOnlyOnCurrentSessionAndSize(t *testing.T) {
 	s, b := directBoard(t)
 	c, err := s.conn(t.Context(), "")

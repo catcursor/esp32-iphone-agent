@@ -55,7 +55,7 @@ const usage = `esp32agent: see and drive an iPhone through an ESP32 Agent board.
   net hotspot-password             show the board's generated hotspot password while in hotspot mode
   net ipv4                         show the board's station IPv4 policy
   net static IPv4 | net dhcp       save a static address or use DHCP on the current station network
-  calibrate [--verify]             measure and verify pointer mapping, or only check the saved mapping
+  calibrate [--verify]             measure and save the four-point mapping, or verify the saved mapping
   listen                           what the iPhone played in the last 30 s, as words (or why it can't be heard)
   listen on|off                    hear the phone's sound while it mirrors (off by default)
   listen mode phone|local          phone: the ESP32 Agent app's words (default); local: whisper.cpp on this

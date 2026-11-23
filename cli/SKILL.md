@@ -16,7 +16,13 @@ At deployment, use `esp32agent ocr install` to provision the pinned [RapidOCR ru
 3. Use `esp32agent io tap X,Y` at the chosen full-screen point, measured from the upper left. Use the OCR item's `tap.x,tap.y` as supplied. For other actions use `io longpress X,Y --duration 1500`, `io swipe X1,Y1,X2,Y2`, `io text 'hello'`, `io keys enter` or `io button HOME`.
 4. Take a fresh screenshot after each action and check what changed. If `data.freshness.status` is `unconfirmed`, read the reason. The connection may still be replaying earlier video or waiting for a frame after the last input. Keep the session open and capture again before using its coordinates.
 
-Before a session’s first positional input the CLI checks the pointer at two locations on the mirrored screen. A change in screen dimensions requires a fresh check. To inspect a saved mapping on a still screen, use `esp32agent calibrate --verify`. It moves the pointer without clicking and reports observed vs requested positions. Use `esp32agent calibrate` to remeasure. Add `--aim` to a tap to apply visual correction at that point.
+## Calibrate the pointer
+
+On first use or when moving the board to another iPhone, open a still portrait screen, keep mirroring active with the AssistiveTouch pointer visible, and run `esp32agent calibrate`. The computer stores one mapping per board ID. Recalibrate after a phone swap even when both screenshots have identical dimensions.
+
+The CLI uses the left and top edges as references and compares one move with five moves over the same distance on each axis. The `data.strokes.x.offset_px` and `data.strokes.y.offset_px` fields report the extra travel per additional move. The CLI applies the correction internally. Pass the current OCR item's `tap.x,tap.y` directly.
+
+The first positional gesture in a session checks two pointer locations. A change in screen dimensions triggers a fresh check. Run `esp32agent calibrate --verify` on a still screen for the requested and observed positions and their errors. It only moves the pointer. Add `--aim` to a tap for visual correction at that point.
 
 For a single known, unique string use `esp32agent io tap-text "Continue" --locate`. For an evenly spaced Cartesian grid with visible zero axes use `esp32agent io tap-grid -25,20 --step 5 --locate`. Omitting `--locate` clicks. Use `esp32agent photo` when the user requests an image from the physical Sense camera.
 

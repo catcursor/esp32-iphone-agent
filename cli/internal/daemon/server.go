@@ -228,11 +228,10 @@ func (s *Server) Do(ctx context.Context, req Request) Response {
 		c.inputMu.Lock()
 		defer c.inputMu.Unlock()
 		ctx = context.WithValue(ctx, inputSessionKey{}, c.Links())
-		mode := newCalibration
 		if req.Verify {
-			mode = verifyCalibration
+			return s.verifyCalibration(ctx, c)
 		}
-		return s.calibrate(ctx, c, mode)
+		return s.calibrate(ctx, c)
 	case "tap", "longpress", "swipe", "text", "keys", "button", "tap-text", "tap-grid":
 		c.inputMu.Lock()
 		defer c.inputMu.Unlock()

@@ -55,7 +55,7 @@ func newPointer(t *testing.T, d Device, s Screen) *Pointer {
 	return p
 }
 
-func TestPointerRehomesEveryTenGestures(t *testing.T) {
+func TestPointerReferencesEdgesEveryTenGestures(t *testing.T) {
 	d := &fakeDevice{}
 	p := newPointer(t, d, nil)
 	p.FinishCalibration(0.5, 0.25) // span 400 x 800
@@ -64,14 +64,14 @@ func TestPointerRehomesEveryTenGestures(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	homes := 0
-	for _, s := range d.sent {
-		if s == "home" {
-			homes++
+	refs := 0
+	for _, cmd := range d.sent {
+		if cmd == "move 0 -5000 40" {
+			refs++
 		}
 	}
-	if homes != 2 || d.sent[0] != "release" || d.sent[2] != "move 200 0" || d.sent[3] != "move 0 400" {
-		t.Fatalf("sent %v", d.sent)
+	if refs != 2 || slices.Contains(d.sent, "home") || d.x != 200 || d.y != 400 {
+		t.Fatalf("sent %v, ended at %d,%d", d.sent, d.x, d.y)
 	}
 }
 
@@ -150,8 +150,24 @@ func TestLongPressHoldsThenReleases(t *testing.T) {
 	var held time.Duration
 	p.Sleep = func(_ context.Context, dd time.Duration) error { held = dd; return nil }
 	p.LongPress(context.Background(), 0.25, 0.5, 2*time.Second)
-	if held != 2*time.Second || fmt.Sprint(d.sent[len(d.sent)-4:]) != "[move 100 0 move 0 400 press release]" {
+	if held != 2*time.Second || fmt.Sprint(d.sent[len(d.sent)-4:]) != "[move 100 0 move 0 200 press release]" {
 		t.Fatalf("sent %v held %v", d.sent, held)
+	}
+}
+
+func TestSavedCalibrationAppliesOffsetLargerThanTenPercent(t *testing.T) {
+	p := newPointer(t, &fakeDevice{}, nil)
+	p.Span = &Span{548, 1186}
+	p.remember("x", [2]float64{150.0 / 548, 272.0 / 720})
+	p.remember("x", [2]float64{350.0 / 548, 535.0 / 720})
+	if err := p.save(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := New(&fakeDevice{}, nil, p.file)
+	for _, target := range []struct{ pixel, units int }{{276, 153}, {650, 437}} {
+		if got := reloaded.dx(float64(target.pixel) / 720); got != target.units {
+			t.Errorf("pixel %d: got %d mouse units, want %d", target.pixel, got, target.units)
+		}
 	}
 }
 
@@ -166,6 +182,30 @@ func TestFixLearnsAnOffset(t *testing.T) {
 	}
 	if math.Abs(p.Drift()-0.02) > 1e-9 {
 		t.Fatalf("drift %v", p.Drift())
+	}
+}
+
+func TestFourPointFitCompensatesEveryRelativeMovementAfterReload(t *testing.T) {
+	// Pixel gain 1.25 per raw unit, plus 5 pixels for each nonzero stroke.
+	span, offset, err := fitStrokes(400, 505.0/1000, 525.0/1000)
+	if err != nil || span != 800 || math.Abs(offset-4) > 1e-9 {
+		t.Fatalf("span %d offset %f err %v", span, offset, err)
+	}
+	d := &fakeDevice{}
+	p := newPointer(t, d, nil)
+	p.Span, p.strokeOffset = &Span{span, span}, [2]float64{offset, offset}
+	if err := p.save(); err != nil {
+		t.Fatal(err)
+	}
+	p = New(d, nil, p.file)
+	p.pos, p.link = &[2]float64{100, 100}, d.Links()
+	for _, target := range [][2]int{{150, 50}, {151, 50}, {100, 100}} {
+		if err := p.moveTo(t.Context(), target[0], target[1], false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := strings.Join(d.sent, ","); got != "move 46 0,move 0 -46,move -46 0,move 0 46" {
+		t.Fatal(got)
 	}
 }
 
@@ -345,6 +385,33 @@ func TestLowContrastPointerRequiresAReversibleHorizontalMovement(t *testing.T) {
 	}
 	if _, ok := LocateBack(before, drawCursor(160, false, 1), back, center, 11./w, reach); ok {
 		t.Fatal("a blinking stationary disc was mistaken for pointer motion")
+	}
+}
+
+func TestCircleCenterOnBrightLineWithShorterThanCommandedNudge(t *testing.T) {
+	const w, h = 360, 640
+	frameAt := func(cx int) image.Image {
+		f := image.NewGray(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				value := 28
+				if x+y/2 >= 316 && x+y/2 <= 319 {
+					value = 236
+				}
+				if (x-cx)*(x-cx)+(y-320)*(y-320) <= 18*18 {
+					value = (value*3 + 68) / 4
+				}
+				f.SetGray(x, y, color.Gray{Y: uint8(value)})
+			}
+		}
+		return f
+	}
+	for _, dx := range []int{11, -11} {
+		before := frameAt(162)
+		pt, ok := LocateBack(before, frameAt(162+dx), before, Point{.5, .5}, float64(2*dx)/w, Point{.5, .5})
+		if !ok || math.Abs(pt.X*w-162) > 1 || math.Abs(pt.Y*h-320) > 1 {
+			t.Fatalf("nudge %d: got %+v, found=%v", dx, pt, ok)
+		}
 	}
 }
 

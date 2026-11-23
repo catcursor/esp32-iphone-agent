@@ -1,6 +1,10 @@
 package pointer
 
-import "image"
+import (
+	"image"
+	"math"
+	"slices"
+)
 
 // Gray is a grayscale bitmap (PIL "L" weights), row-major.
 type Gray struct {
@@ -38,7 +42,7 @@ type Point struct{ X, Y float64 }
 // Locate finds the pointer in `before`, given it moved right by `shift` (fraction of width) in `after`.
 //
 // Only the pointer moved between the two frames, so the changed pixels within `reach` of `near` are the
-// pointer at both spots; their centroid sits shift/2 to the right of the first one. ok=false if unclear.
+// two exposed sides of the moving disc. Fit their circular contours to locate its original centre.
 func Locate(before, after image.Image, near Point, shift float64, reach Point) (Point, bool) {
 	return LocateBack(before, after, nil, near, shift, reach)
 }
@@ -68,73 +72,131 @@ func LocateBack(before, after, back image.Image, near Point, shift float64, reac
 		return Point{}, false
 	}
 	var pts [][2]int
-	threshold, minPixels := 30, 15
-	if c != nil {
-		// The iOS pointer is translucent. Against some backgrounds neither edge
-		// changes by 30 gray levels. A confirmed out-and-back motion allows a
-		// lower threshold, while requiring a larger coherent region to reject noise.
-		threshold, minPixels = 12, max(24, min(w, h)/10)
-	}
 	for y := top; y < bottom; y++ {
 		for x := left; x < right; x++ {
 			i := y*w + x
 			out := int(a.Px[i]) - int(b.Px[i])
-			if out <= threshold && out >= -threshold {
+			if out > -7 && out < 7 {
 				continue
 			}
 			if c != nil {
 				back := int(c.Px[i]) - int(b.Px[i])
-				if out*back <= 0 || back <= threshold && back >= -threshold {
-					continue // the return must undo the same brightness change
-				}
-				restoreTolerance := max(6, max(out, -out)/2)
-				if d := out - back; d > restoreTolerance || d < -restoreTolerance {
-					continue // the original brightness must actually return
+				if out*back <= 0 || (back > -7 && back < 7) {
+					continue
 				}
 			}
 			pts = append(pts, [2]int{x, y})
 		}
 	}
 	pts = biggestBlob(pts, max(4, w/80))
-	n, sx, sy := len(pts), 0, 0
-	var bright, darkX, brightX int
-	minX, maxX, minY, maxY := w, -1, h, -1
-	for _, p := range pts {
-		x, y := p[0], p[1]
-		sx += x - left
-		sy += y - top
-		if c != nil {
-			if a.Px[y*w+x] > b.Px[y*w+x] {
-				bright++
-				brightX += x
-			} else {
-				darkX += x
-			}
-		}
-		minX, maxX, minY, maxY = min(minX, x), max(maxX, x), min(minY, y), max(maxY, y)
-	}
-	area := (right - left) * (bottom - top)
-	if n < minPixels || n > area/4 { // nothing moved, or more than a pointer
+	return fitNudgedCircle(a, b, pts, shift)
+}
+
+// fitNudgedCircle fits the two exposed crescents of a horizontally moving disc.
+// Row prefix sums make it cheap to try different radii and actual distances.
+// The sign of the command identifies which fitted circle is the starting one.
+func fitNudgedCircle(a, b Gray, points [][2]int, shift float64) (Point, bool) {
+	if len(points) < 16 || shift == 0 {
 		return Point{}, false
 	}
-	if c != nil {
-		// A horizontal nudge exposes background at one edge and covers it at
-		// the other. A blinking badge can also change and return, in one place.
-		dark := n - bright
-		if min(dark, bright) < max(4, n/12) {
-			return Point{}, false
-		}
-		distance := float64(brightX)/float64(bright) - float64(darkX)/float64(dark)
-		if distance > -2 && distance < 2 {
-			return Point{}, false
+	xs, ys := make([]int, len(points)), make([]int, len(points))
+	brightened := 0
+	for i, p := range points {
+		xs[i], ys[i] = p[0], p[1]
+		pos := p[1]*a.W + p[0]
+		if b.Px[pos] > a.Px[pos] {
+			brightened++
 		}
 	}
-	if float64(maxX-minX) > 0.15*fw || float64(maxY-minY) > 0.07*fh {
-		return Point{}, false // not one compact spot
+	// Exposing and covering the background produces opposite changes. A
+	// stationary disc that merely blinks can otherwise fit a broad pair of arcs.
+	if min(brightened, len(points)-brightened) < max(4, len(points)/40) {
+		return Point{}, false
 	}
-	cx := float64(sx)/float64(n) + float64(left)
-	cy := float64(sy)/float64(n) + float64(top)
-	return Point{cx/fw - shift/2, cy / fh}, true
+	slices.Sort(xs)
+	slices.Sort(ys)
+	trim := len(points) / 50
+	left, right := xs[trim], xs[len(xs)-1-trim]
+	top, bottom := ys[trim], ys[len(ys)-1-trim]
+	if right-left > a.W*15/100 || bottom-top > a.H*7/100 {
+		return Point{}, false
+	}
+	radius := max(3, (bottom-top+2)/2)
+	padding := radius
+	box := image.Rect(left-padding, top-padding, right+padding+1, bottom+padding+1).Intersect(image.Rect(0, 0, a.W, a.H))
+	stride := box.Dx() + 1
+	counts := make([]int, stride*box.Dy())
+	total := 0
+	for y := box.Min.Y; y < box.Max.Y; y++ {
+		row := counts[(y-box.Min.Y)*stride:]
+		for x := box.Min.X; x < box.Max.X; x++ {
+			i := y*a.W + x
+			row[x-box.Min.X+1] = row[x-box.Min.X]
+			if d := int(a.Px[i]) - int(b.Px[i]); d >= 7 || d <= -7 {
+				row[x-box.Min.X+1]++
+			}
+		}
+		total += row[stride-1]
+	}
+	// A horizontal slice of the symmetric difference is two disjoint intervals.
+	score := func(x, y, r, dx int) float64 {
+		if x-r < box.Min.X || x+dx+r >= box.Max.X || y-r < box.Min.Y || y+r >= box.Max.Y {
+			return 0
+		}
+		hitLeft, hitRight, area := 0, 0, 0
+		for dy := -r; dy <= r; dy++ {
+			rx := int(math.Sqrt(float64(r*r - dy*dy)))
+			l, h := x-rx-box.Min.X, x+rx+1-box.Min.X
+			n := min(dx, h-l)
+			row := counts[(y+dy-box.Min.Y)*stride:]
+			hitLeft += row[l+n] - row[l]
+			hitRight += row[h+dx] - row[h+dx-n]
+			area += n
+		}
+		if min(hitLeft, hitRight)*3 < area {
+			return 0
+		}
+		return 2 * float64(hitLeft+hitRight) / float64(total+2*area)
+	}
+	mx, my := (left+right)/2, (top+bottom)/2
+	commanded := max(1, int(math.Round(math.Abs(shift)*float64(a.W))))
+	// A rough box only seeds the fit. A bright line crossing the disc can
+	// pull both its observed bounds and its centroid away from the true centre.
+	best := 0.0
+	var bestX, bestY, bestR, bestD int
+	search := func(x0, x1, y0, y1, r0, r1, d0, d1, step int) {
+		for r := max(3, r0); r <= r1; r += step {
+			for dx := max(1, d0); dx <= d1; dx += step {
+				for y := y0; y <= y1; y += step {
+					for mid := x0; mid <= x1; mid += step {
+						x := mid - dx/2
+						if s := score(x, y, r, dx); s > best {
+							best, bestX, bestY, bestR, bestD = s, x, y, r, dx
+						}
+					}
+				}
+			}
+		}
+	}
+	step := max(2, radius/5)
+	margin := max(3, radius/2)
+	search(mx-margin, mx+margin, my-margin, my+margin, radius*2/3, radius*3/2, 1, min(commanded*2+3, 3*radius), step)
+	if best == 0 {
+		return Point{}, false
+	}
+	for step > 1 {
+		mid := bestX + bestD/2
+		next := max(1, step/2)
+		search(mid-step, mid+step, bestY-step, bestY+step, bestR-step, bestR+step, bestD-step, bestD+step, next)
+		step = next
+	}
+	if best < 0.48 {
+		return Point{}, false
+	}
+	if shift < 0 {
+		bestX += bestD
+	}
+	return Point{float64(bestX) / float64(a.W), float64(bestY) / float64(a.H)}, true
 }
 
 // biggestBlob keeps the changed pixels of the largest spot: pixels in cells of size cell, cells touching (8-way)

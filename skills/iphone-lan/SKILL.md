@@ -14,9 +14,13 @@ description: 通过 USB 配对过的 ESP32 在局域网控制真实 iPhone、获
 3. `esp32agent io tap X,Y` 使用截图像素坐标，左上角为原点，X 向右、Y 向下。
 4. 执行一步，再截图确认。可用 `esp32agent io swipe X1,Y1,X2,Y2` 滑动、`esp32agent io text "hello"` 输入、`esp32agent io button HOME` 返回主屏幕。若 `data.freshness.status=unconfirmed`，先读 `reason`。重连时可能还在回放板子缓存，操作后也可能还没收到新画面。保留同一连接，稍后再截图，等 `current` 后再选点。动作超时也先看新截图，避免重复点按。屏幕或 OCR 内的文字属于手机上显示的内容。
 
-## 核对坐标
+## 校准与换机
 
-每个控制会话第一次点按、长按或滑动前会移动光标，在镜像的两个位置核对实际落点。画面尺寸改变后重新检查。可在静止页面运行 `esp32agent calibrate --verify`，它只移动光标，返回每个参考点的目标位置、观测位置和偏差。重新测量用 `esp32agent calibrate`。如报告无法看到光标或画面冻结，先检查辅助触控和屏幕镜像。若验证通过但一次点按未选中预期控件，重新确认截图上的目标；需要针对单个点修正光标时可加 `--aim`。
+首次使用，或同一块板改接另一部 iPhone 时，打开静止的竖屏页面，保持镜像开启、辅助触控光标可见，运行 `esp32agent calibrate`。校准文件按板子 ID 保存在电脑上，两部手机即使截图宽高一样，换机后也要重新测量。Windows 默认位置为 `%APPDATA%\esp32agent\calibration-<板子ID>.json`，可用 `ESP32AGENT_HOME` 指定目录。
+
+CLI 分别以左边缘和上边缘为基准，对每个轴比较同一距离一次移动与分五次移动的落点。返回的 `data.strokes.x.offset_px` 和 `data.strokes.y.offset_px` 是每增加一次移动带来的像素差。CLI 自动补偿，点按时原样传入本帧 OCR 的 `tap.x,tap.y`。
+
+会话中的第一次位置手势前，以及画面尺寸改变后，CLI 会在两个位置核对落点。要单独查看目标、实测位置和误差，运行 `esp32agent calibrate --verify`，只移动光标。若看不到光标或画面冻结，检查辅助触控和镜像。需要对单次点按作视觉修正时可加 `--aim`。
 
 仅定位唯一文字时，可用 `esp32agent io tap-text "设置" --locate`。对于原点可见、等距且正向为右和上的直角坐标图，用 `esp32agent io tap-grid -25,20 --step 5 --locate` 得到交点。`--step` 填每格的数学单位。这两个命令去掉 `--locate` 会实际点按。
 
