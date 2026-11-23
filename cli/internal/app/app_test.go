@@ -16,6 +16,7 @@ import (
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/ble"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/config"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/daemon"
+	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/pointer"
 	"github.com/onehumanbeing/esp32-iphone-agent/cli/internal/video"
 )
 
@@ -164,7 +165,10 @@ func TestSimPairScreenshotTapText(t *testing.T) {
 
 	// The simulator plays a static video fixture. A saved span alone cannot
 	// authorize a click when the pointer cannot be observed moving on screen.
-	os.WriteFile(config.CalibrationPath(dir, "246f28aa6ad5"), []byte(`{"w":400,"h":860,"moves":"axis"}`), 0o600)
+	mapping := fmt.Sprintf(`{"w":400,"h":860,"moves":%q}`, pointer.MovesAxis)
+	if err := os.WriteFile(config.CalibrationPath(dir, "246f28aa6ad5"), []byte(mapping), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if o := run(t, a, "io", "tap", "240,520"); o.Status != "error" {
 		t.Fatalf("tap accepted on a screen without a trackable pointer: %+v", o)
 	}
@@ -220,7 +224,7 @@ func TestSimPairScreenshotTapText(t *testing.T) {
 	if strings.Contains(string(logged), " click\n") {
 		t.Fatal("board received a click despite failed pointer verification")
 	}
-	for _, want := range []string{" stream on\n", " home\n", " type natie\n", " key space\n", " type ok\n"} {
+	for _, want := range []string{" stream on\n", " move -5000 0 40\n", " move 0 -5000 40\n", " type natie\n", " key space\n", " type ok\n"} {
 		if !strings.Contains(string(logged), want) {
 			t.Errorf("the board never got %q:\n%s", strings.TrimSpace(want), logged)
 		}
